@@ -12,6 +12,7 @@ import {
   setIcon,
 } from "obsidian";
 import * as L from "leaflet";
+import { pinyin } from "pinyin-pro";
 
 const VIEW_TYPE = "footprint-studio-view";
 
@@ -54,17 +55,24 @@ interface BlogPostOption {
 interface NominatimAddress {
   country?: string;
   state?: string;
+  state_district?: string;
   province?: string;
   city?: string;
   town?: string;
   municipality?: string;
   county?: string;
+  city_district?: string;
+  district?: string;
+  borough?: string;
   village?: string;
+  township?: string;
   suburb?: string;
   neighbourhood?: string;
   quarter?: string;
   hamlet?: string;
   road?: string;
+  pedestrian?: string;
+  residential?: string;
   house_number?: string;
   tourism?: string;
   amenity?: string;
@@ -85,6 +93,9 @@ type FieldName =
   | "country"
   | "region"
   | "city"
+  | "district"
+  | "town"
+  | "street"
   | "place"
   | "lat"
   | "lng"
@@ -174,9 +185,14 @@ export default class FootprintStudioPlugin extends Plugin {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 
     this.registerView(VIEW_TYPE, leaf => new FootprintStudioView(leaf, this));
-    this.addRibbonIcon("map-pinned", "新建或编辑足迹", () => {
+    this.addRibbonIcon("map-pinned", "新建足迹", () => void this.openStudio());
+    this.addRibbonIcon("square-pen", "编辑当前足迹", () => {
       const activeFile = this.app.workspace.getActiveFile();
-      void this.openStudio(this.isFootprintFile(activeFile) ? activeFile : undefined);
+      if (!this.isFootprintFile(activeFile)) {
+        new Notice("请先打开一篇足迹 Markdown");
+        return;
+      }
+      void this.openStudio(activeFile);
     });
 
     this.addCommand({
@@ -228,11 +244,22 @@ export default class FootprintStudioPlugin extends Plugin {
   }
 
   async openStudio(file?: TFile): Promise<void> {
-    let leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE)[0];
-    if (!leaf) {
-      leaf = this.app.workspace.getLeaf("tab");
-      await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    if (file) {
+      const existingLeaf = this.app.workspace
+        .getLeavesOfType(VIEW_TYPE)
+        .find(
+          leaf =>
+            leaf.view instanceof FootprintStudioView &&
+            leaf.view.getEditingPath() === file.path
+        );
+      if (existingLeaf) {
+        this.app.workspace.revealLeaf(existingLeaf);
+        return;
+      }
     }
+
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({ type: VIEW_TYPE, active: true });
     this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
     if (view instanceof FootprintStudioView) await view.openFile(file ?? null);
@@ -253,8 +280,8 @@ class FootprintStudioView extends ItemView {
   private postsEl!: HTMLElement;
   private selectedPostsEl!: HTMLElement;
   private postSearchInput!: HTMLInputElement;
+  private fileNameButton!: HTMLButtonElement;
   private searchResultsEl!: HTMLElement;
-  private fileNameDirty = false;
   private saving = false;
   private draggedPhoto = -1;
 
@@ -273,6 +300,10 @@ class FootprintStudioView extends ItemView {
 
   getIcon(): string {
     return "map-pinned";
+  }
+
+  getEditingPath(): string | null {
+    return this.currentFile?.path ?? null;
   }
 
   async onOpen(): Promise<void> {
@@ -300,10 +331,14 @@ class FootprintStudioView extends ItemView {
     this.currentFile = file;
     this.fields.fileName.value = file.basename;
     this.fields.fileName.disabled = true;
+    this.fileNameButton.disabled = true;
     this.fields.visitedAt.value = dateString(frontmatter.visitedAt);
     this.fields.country.value = String(frontmatter.country ?? "");
     this.fields.region.value = String(frontmatter.region ?? "");
     this.fields.city.value = String(frontmatter.city ?? "");
+    this.fields.district.value = String(frontmatter.district ?? "");
+    this.fields.town.value = String(frontmatter.town ?? "");
+    this.fields.street.value = String(frontmatter.street ?? "");
     this.fields.place.value = String(frontmatter.place ?? "");
     this.fields.lat.value = String(frontmatter.coordinates?.lat ?? "");
     this.fields.lng.value = String(frontmatter.coordinates?.lng ?? "");
@@ -349,8 +384,8 @@ class FootprintStudioView extends ItemView {
     heading.createEl("h2", { text: "足迹编辑器" });
     heading.createEl("p", { text: "在地图上标记去向，把照片和当时的文字留在一起。" });
     const actions = header.createDiv({ cls: "footprint-studio-header-actions" });
-    const resetButton = makeButton(actions, "新建", "file-plus-2");
-    resetButton.addEventListener("click", () => this.resetForm());
+    const resetButton = makeButton(actions, "新建标签", "file-plus-2");
+    resetButton.addEventListener("click", () => void this.plugin.openStudio());
     const saveButton = makeButton(actions, "保存足迹", "save", "mod-cta");
     saveButton.addEventListener("click", () => void this.saveFootprint(saveButton));
 
@@ -421,20 +456,30 @@ class FootprintStudioView extends ItemView {
     const section = this.createSection(parent, "基础信息", "map-pin");
     const grid = section.createDiv({ cls: "footprint-studio-field-grid" });
     this.fields.fileName = this.createInput(grid, "文件名", "fileName", "例如 2026-07-17-panmen");
+    const fileNameControl = document.createElement("div");
+    fileNameControl.className = "footprint-studio-file-name-control";
+    this.fields.fileName.replaceWith(fileNameControl);
+    fileNameControl.append(this.fields.fileName);
+    this.fileNameButton = makeButton(
+      fileNameControl,
+      "生成",
+      "wand-sparkles",
+      "footprint-studio-generate-name"
+    );
+    this.fileNameButton.addEventListener("click", () => this.generateFileName());
     this.fields.visitedAt = this.createInput(grid, "日期", "visitedAt", "", "date");
+    this.fields.lat = this.createInput(grid, "纬度", "lat", "31.2883", "number");
+    this.fields.lng = this.createInput(grid, "经度", "lng", "120.6183", "number");
     this.fields.country = this.createInput(grid, "国家", "country", "中国");
     this.fields.region = this.createInput(grid, "省 / 地区", "region", "江苏");
     this.fields.city = this.createInput(grid, "城市", "city", "苏州");
-    this.fields.place = this.createInput(grid, "地点", "place", "盘门");
-    this.fields.lat = this.createInput(grid, "纬度", "lat", "31.2883", "number");
-    this.fields.lng = this.createInput(grid, "经度", "lng", "120.6183", "number");
+    this.fields.district = this.createInput(grid, "区 / 县", "district", "姑苏区");
+    this.fields.town = this.createInput(grid, "乡镇 / 街道", "town", "沧浪街道");
+    this.fields.street = this.createInput(grid, "道路 / 门牌", "street", "东大街 49 号");
+    this.fields.place = this.createInput(grid, "具体地点", "place", "盘门");
     this.fields.lat.setAttribute("step", "any");
     this.fields.lng.setAttribute("step", "any");
 
-    this.fields.fileName.addEventListener("input", () => (this.fileNameDirty = true));
-    for (const name of ["visitedAt", "city", "place"] as FieldName[]) {
-      this.fields[name].addEventListener("input", () => this.updateSuggestedFileName());
-    }
     for (const name of ["lat", "lng"] as FieldName[]) {
       this.fields[name].addEventListener("change", () => this.updateMarker(false));
     }
@@ -516,6 +561,7 @@ class FootprintStudioView extends ItemView {
     type = "text"
   ): HTMLInputElement {
     const wrapper = parent.createEl("label", { cls: "footprint-studio-field" });
+    wrapper.dataset.field = name;
     wrapper.createSpan({ text: label });
     const input = wrapper.createEl("input", {
       type,
@@ -530,11 +576,11 @@ class FootprintStudioView extends ItemView {
     this.disposePhotos();
     this.photos = [];
     this.selectedPosts.clear();
-    this.fileNameDirty = false;
     if (!this.fields.visitedAt) return;
 
     for (const field of Object.values(this.fields)) field.value = "";
     this.fields.fileName.disabled = false;
+    this.fileNameButton.disabled = false;
     this.fields.visitedAt.value = todayString();
     this.draftInput.checked = false;
     this.postSearchInput.value = "";
@@ -548,15 +594,23 @@ class FootprintStudioView extends ItemView {
       [this.plugin.settings.defaultLat, this.plugin.settings.defaultLng],
       this.plugin.settings.defaultZoom
     );
-    this.updateSuggestedFileName();
   }
 
-  private updateSuggestedFileName(): void {
-    if (this.currentFile || this.fileNameDirty) return;
-    const place = this.fields.place.value.trim() || this.fields.city.value.trim();
-    this.fields.fileName.value = sanitizeSegment(
-      [this.fields.visitedAt.value || todayString(), place].filter(Boolean).join("-")
-    );
+  private generateFileName(): void {
+    if (this.currentFile) return;
+    const visitedAt = this.fields.visitedAt.value || todayString();
+    const place = this.fields.place.value.trim();
+    if (!place) {
+      new Notice("请先填写地点，再生成文件名");
+      this.fields.place.focus();
+      return;
+    }
+    const placePinyin = pinyin(place, {
+      toneType: "none",
+      type: "array",
+      nonZh: "consecutive",
+    }).join("-");
+    this.fields.fileName.value = sanitizeSegment(`${visitedAt}-${placePinyin}`);
   }
 
   private setCoordinates(lat: number, lng: number, moveMap: boolean): void {
@@ -618,7 +672,7 @@ class FootprintStudioView extends ItemView {
           const lat = Number(result.lat);
           const lng = Number(result.lon);
           this.setCoordinates(lat, lng, true);
-          this.applyAddress(result.address ?? {}, result.name);
+          this.applyAddress(result.address ?? {}, result.name, result.display_name);
           this.searchResultsEl.hidden = true;
         });
       }
@@ -657,25 +711,65 @@ class FootprintStudioView extends ItemView {
         headers: { "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6" },
       });
       const result = response.json as NominatimResult;
-      this.applyAddress(result.address ?? {}, result.name);
-      new Notice("已补全乡镇和具体地点，原城市保持不变");
+      this.applyAddress(result.address ?? {}, result.name, result.display_name);
+      new Notice("已根据新坐标更新省、市、区和地点信息");
     } catch (error) {
       console.error("Footprint Studio reverse geocoding failed", error);
       new Notice("地点反查失败，请手动填写或稍后重试");
     }
   }
 
-  private applyAddress(address: NominatimAddress, name?: string): void {
-    if (!this.fields.country.value.trim() && address.country) {
-      this.fields.country.value = address.country;
-    }
-    if (!this.fields.region.value.trim()) {
-      this.fields.region.value = address.state ?? address.province ?? "";
-    }
-    if (!this.fields.city.value.trim()) {
-      this.fields.city.value =
-        address.city ?? address.municipality ?? address.county ?? "";
-    }
+  private applyAddress(
+    address: NominatimAddress,
+    name?: string,
+    displayName = ""
+  ): void {
+    const displayParts = displayName
+      .split(",")
+      .map(part => part.trim())
+      .filter(Boolean);
+    const isDistrictLevel = (value: string): boolean =>
+      /(?:区|县|旗|镇|乡|街道|村)$/.test(value);
+    const isCityLevel = (value: string): boolean =>
+      /(?:市|自治州|地区|盟)$/.test(value) && !isDistrictLevel(value);
+    const cityCandidates = [
+      address.city,
+      ...displayParts.filter(isCityLevel),
+      address.municipality,
+      address.state_district,
+      address.county,
+      address.state,
+    ]
+      .map(value => String(value ?? "").trim())
+      .filter(value => value && !isDistrictLevel(value));
+    const rawAddressCity = String(address.city ?? "").trim();
+    const city =
+      cityCandidates.find(isCityLevel) ??
+      (rawAddressCity && !isDistrictLevel(rawAddressCity) ? rawAddressCity : "");
+    const districtCandidates = [
+      address.city_district,
+      address.district,
+      address.county,
+      address.borough,
+      ...displayParts.filter(part => /(?:区|县|旗)$/.test(part)),
+    ]
+      .map(value => String(value ?? "").trim())
+      .filter(value => value && value !== city);
+    const district = districtCandidates[0] ?? "";
+    const town =
+      address.town ??
+      address.township ??
+      address.village ??
+      address.hamlet ??
+      address.suburb;
+    const streetName = address.road ?? address.pedestrian ?? address.residential;
+    const street = [streetName, address.house_number].filter(Boolean).join(" ");
+    this.fields.country.value = address.country ?? "";
+    this.fields.region.value = address.state ?? address.province ?? "";
+    this.fields.city.value = city;
+    this.fields.district.value = district;
+    this.fields.town.value = town ?? "";
+    this.fields.street.value = street;
 
     const administrativeValues = new Set(
       [
@@ -685,30 +779,26 @@ class FootprintStudioView extends ItemView {
         address.city,
         address.municipality,
         address.county,
+        district,
+        town,
+        street,
       ]
         .filter(Boolean)
         .map(value => String(value).trim())
     );
-    const road = [address.road, address.house_number].filter(Boolean).join(" ");
     const placeParts = [
-      address.town,
-      address.village,
-      address.hamlet,
-      address.suburb,
-      address.neighbourhood,
-      address.quarter,
       name,
       address.tourism,
       address.historic,
       address.amenity,
-      road,
+      address.neighbourhood,
+      address.quarter,
     ]
       .map(value => String(value ?? "").trim())
       .filter(value => value && !administrativeValues.has(value))
       .filter((value, index, values) => values.indexOf(value) === index);
 
-    if (placeParts.length) this.fields.place.value = placeParts.join(" · ");
-    this.updateSuggestedFileName();
+    this.fields.place.value = placeParts.join(" · ");
   }
 
   private addPhotoFiles(files: File[]): void {
@@ -964,7 +1054,8 @@ class FootprintStudioView extends ItemView {
       }
       this.currentFile = savedFile;
       this.fields.fileName.value = savedFile.basename;
-      this.fields.fileName.disabled = true;
+    this.fields.fileName.disabled = true;
+    this.fileNameButton.disabled = true;
       this.renderPhotos();
       new Notice(`足迹已保存：${savedFile.path}`);
     } catch (error) {
@@ -983,6 +1074,9 @@ class FootprintStudioView extends ItemView {
     country: string;
     region: string;
     city: string;
+    district: string;
+    town: string;
+    street: string;
     place: string;
     lat: number;
     lng: number;
@@ -994,6 +1088,9 @@ class FootprintStudioView extends ItemView {
       country: this.fields.country.value.trim(),
       region: this.fields.region.value.trim(),
       city: this.fields.city.value.trim(),
+      district: this.fields.district.value.trim(),
+      town: this.fields.town.value.trim(),
+      street: this.fields.street.value.trim(),
       place: this.fields.place.value.trim(),
       lat: Number(this.fields.lat.value),
       lng: Number(this.fields.lng.value),
@@ -1008,11 +1105,16 @@ class FootprintStudioView extends ItemView {
       `country: ${yamlString(values.country)}`,
       `region: ${yamlString(values.region)}`,
       `city: ${yamlString(values.city)}`,
+    ];
+    if (values.district) lines.push(`district: ${yamlString(values.district)}`);
+    if (values.town) lines.push(`town: ${yamlString(values.town)}`);
+    if (values.street) lines.push(`street: ${yamlString(values.street)}`);
+    lines.push(
       `place: ${yamlString(values.place)}`,
       "coordinates:",
       `  lat: ${values.lat}`,
-      `  lng: ${values.lng}`,
-    ];
+      `  lng: ${values.lng}`
+    );
     if (this.draftInput.checked) lines.push("draft: true");
     if (this.selectedPosts.size) {
       lines.push("relatedPosts:");

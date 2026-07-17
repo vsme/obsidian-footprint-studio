@@ -1,7 +1,7 @@
 {
   "id": "footprint-studio",
   "name": "Footprint Studio",
-  "version": "0.2.0",
+  "version": "0.4.0",
   "minAppVersion": "1.6.0",
   "description": "在 Obsidian 中通过地图、照片和表单创建或编辑 Astro 足迹记录。",
   "author": "Yaavi",

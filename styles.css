@@ -392,6 +392,18 @@
   gap: 12px;
 }
 
+.footprint-studio-field[data-field="fileName"] {
+  grid-column: 1 / -1;
+}
+
+.footprint-studio-field[data-field="visitedAt"] {
+  grid-column: span 2;
+}
+
+.footprint-studio-field[data-field="place"] {
+  grid-column: span 2;
+}
+
 .footprint-studio-field {
   display: flex;
   min-width: 0;
@@ -410,6 +422,31 @@
 
 .footprint-studio-field input:disabled {
   opacity: 0.68;
+}
+
+.footprint-studio-file-name-control {
+  display: flex;
+  min-width: 0;
+  gap: 6px;
+}
+
+.footprint-studio-file-name-control input {
+  min-width: 0;
+  flex: 1;
+}
+
+.footprint-studio-generate-name {
+  display: inline-flex;
+  padding-inline: 10px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+}
+
+.footprint-studio-generate-name svg {
+  width: 14px;
+  height: 14px;
 }
 
 .footprint-studio-toggle {
@@ -562,7 +599,7 @@
 
 .footprint-studio-photo-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
 }
 
@@ -572,10 +609,24 @@
   border: 1px solid var(--background-modifier-border);
   border-radius: 10px;
   background: var(--background-secondary);
+  cursor: grab;
 }
 
 .footprint-studio-photo-card.is-dragging {
   opacity: 0.45;
+  cursor: grabbing;
+}
+
+.footprint-studio-photo-card:active {
+  cursor: grabbing;
+}
+
+.footprint-studio-photo-fields input {
+  cursor: text;
+}
+
+.footprint-studio-photo-actions button {
+  cursor: pointer;
 }
 
 .footprint-studio-photo-preview {
@@ -736,9 +787,12 @@
     font-size: var(--font-ui-smaller);
   }
 
-  .footprint-studio-field-grid,
-  .footprint-studio-photo-grid {
+  .footprint-studio-field-grid {
     grid-template-columns: 1fr;
+  }
+
+  .footprint-studio-field-grid .footprint-studio-field {
+    grid-column: 1 / -1;
   }
 
   .footprint-studio-photo-intro {
