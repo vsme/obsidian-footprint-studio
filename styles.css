@@ -590,6 +590,33 @@
   margin-bottom: 12px;
 }
 
+.footprint-studio-photo-section {
+  position: relative;
+}
+
+.footprint-studio-photo-section::after {
+  position: absolute;
+  z-index: 20;
+  inset: 10px 0;
+  display: flex;
+  content: "松开以添加照片";
+  opacity: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-accent);
+  border: 2px dashed var(--interactive-accent);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--background-primary) 90%, transparent);
+  font-size: var(--font-ui-medium);
+  font-weight: 600;
+  pointer-events: none;
+  transition: opacity 120ms ease;
+}
+
+.footprint-studio-photo-section.is-file-dragging::after {
+  opacity: 1;
+}
+
 .footprint-studio-photo-intro p {
   margin: 0;
   color: var(--text-muted);

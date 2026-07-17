@@ -30,9 +30,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 var __toCommonJS = (mod) => __copyProps(__defProp({}, "__esModule", { value: true }), mod);
 
-// src/data/.obsidian/plugins/footprint-studio/node_modules/.pnpm/leaflet@1.9.4/node_modules/leaflet/dist/leaflet-src.js
+// node_modules/.pnpm/leaflet@1.9.4/node_modules/leaflet/dist/leaflet-src.js
 var require_leaflet_src = __commonJS({
-  "src/data/.obsidian/plugins/footprint-studio/node_modules/.pnpm/leaflet@1.9.4/node_modules/leaflet/dist/leaflet-src.js"(exports, module2) {
+  "node_modules/.pnpm/leaflet@1.9.4/node_modules/leaflet/dist/leaflet-src.js"(exports, module2) {
     (function(global, factory) {
       typeof exports === "object" && typeof module2 !== "undefined" ? factory(exports) : typeof define === "function" && define.amd ? define(["exports"], factory) : (global = typeof globalThis !== "undefined" ? globalThis : global || self, factory(global.leaflet = {}));
     })(exports, (function(exports2) {
@@ -9580,7 +9580,7 @@ var require_leaflet_src = __commonJS({
   }
 });
 
-// src/data/.obsidian/plugins/footprint-studio/src/main.ts
+// src/main.ts
 var main_exports = {};
 __export(main_exports, {
   default: () => FootprintStudioPlugin
@@ -9589,7 +9589,7 @@ module.exports = __toCommonJS(main_exports);
 var import_obsidian = require("obsidian");
 var L2 = __toESM(require_leaflet_src(), 1);
 
-// src/data/.obsidian/plugins/footprint-studio/node_modules/.pnpm/pinyin-pro@3.28.1/node_modules/pinyin-pro/dist/index.mjs
+// node_modules/.pnpm/pinyin-pro@3.28.1/node_modules/pinyin-pro/dist/index.mjs
 var DoubleUnicodePrefixReg = /^[\uD800-\uDBFF]$/;
 var DoubleUnicodeSuffixReg = /^[\uDC00-\uDFFF]$/;
 var DoubleUnicodeReg = /[\uD800-\uDBFF][\uDC00-\uDFFF]/g;
@@ -33901,7 +33901,7 @@ var DEFAULT_OPTIONS = {
   traditional: false
 };
 
-// src/data/.obsidian/plugins/footprint-studio/src/main.ts
+// src/main.ts
 var VIEW_TYPE = "footprint-studio-view";
 var DEFAULT_SETTINGS = {
   footprintsFolder: "footprints",
@@ -33939,6 +33939,13 @@ function extensionOf(name) {
 function sanitizeSegment(value, fallback = "footprint") {
   const safe = value.normalize("NFKC").trim().replace(/[\\/:*?\"<>|#^\[\]]+/g, "-").replace(/\s+/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
   return safe || fallback;
+}
+function placePinyinSegment(value) {
+  return pinyin(value, {
+    toneType: "none",
+    type: "array",
+    nonZh: "consecutive"
+  }).join("").normalize("NFKC").replace(/[^a-zA-Z0-9]+/g, "").toLowerCase();
 }
 function stripFrontmatter(markdown) {
   return markdown.replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n)?/, "").trim();
@@ -34059,7 +34066,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     return VIEW_TYPE;
   }
   getDisplayText() {
-    return this.currentFile ? `\u7F16\u8F91\u8DB3\u8FF9 \xB7 ${this.currentFile.basename}` : "\u65B0\u5EFA\u8DB3\u8FF9";
+    return this.currentFile?.basename ?? "\u65B0\u5EFA\u8DB3\u8FF9";
   }
   getIcon() {
     return "map-pinned";
@@ -34086,9 +34093,10 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       return;
     }
     this.currentFile = file;
+    this.refreshTitle();
     this.fields.fileName.value = file.basename;
-    this.fields.fileName.disabled = true;
-    this.fileNameButton.disabled = true;
+    this.fields.fileName.disabled = false;
+    this.fileNameButton.disabled = false;
     this.fields.visitedAt.value = dateString(frontmatter.visitedAt);
     this.fields.country.value = String(frontmatter.country ?? "");
     this.fields.region.value = String(frontmatter.region ?? "");
@@ -34131,7 +34139,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.contentEl.addClass("footprint-studio-view");
     const header = this.contentEl.createDiv({ cls: "footprint-studio-header" });
     const heading = header.createDiv({ cls: "footprint-studio-heading" });
-    heading.createEl("h2", { text: "\u8DB3\u8FF9\u7F16\u8F91\u5668" });
+    this.headingTitleEl = heading.createEl("h2", { text: this.getDisplayText() });
     heading.createEl("p", { text: "\u5728\u5730\u56FE\u4E0A\u6807\u8BB0\u53BB\u5411\uFF0C\u628A\u7167\u7247\u548C\u5F53\u65F6\u7684\u6587\u5B57\u7559\u5728\u4E00\u8D77\u3002" });
     const actions = header.createDiv({ cls: "footprint-studio-header-actions" });
     const resetButton = makeButton(actions, "\u65B0\u5EFA\u6807\u7B7E", "file-plus-2");
@@ -34255,9 +34263,10 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   }
   renderPhotoSection(parent) {
     const section = this.createSection(parent, "\u7167\u7247", "images");
+    section.addClass("footprint-studio-photo-section");
     const intro = section.createDiv({ cls: "footprint-studio-photo-intro" });
     intro.createEl("p", {
-      text: "\u9009\u62E9\u7167\u7247\u540E\u53EF\u62D6\u52A8\u6392\u5E8F\uFF1B\u66FF\u4EE3\u6587\u672C\u4F1A\u5199\u5165 Astro \u7684 photos \u5B57\u6BB5\u3002"
+      text: "\u9009\u62E9\u6216\u76F4\u63A5\u62D6\u5165\u7167\u7247\uFF1B\u6DFB\u52A0\u540E\u53EF\u62D6\u52A8\u6392\u5E8F\u3002"
     });
     const picker = makeButton(intro, "\u9009\u62E9\u56FE\u7247", "image-plus", "mod-cta");
     const input = document.createElement("input");
@@ -34272,6 +34281,30 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     section.append(input);
     picker.addEventListener("click", () => input.click());
     this.photosEl = section.createDiv({ cls: "footprint-studio-photo-grid" });
+    const containsFiles = (event) => Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    section.addEventListener("dragenter", (event) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      section.addClass("is-file-dragging");
+    });
+    section.addEventListener("dragover", (event) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      section.addClass("is-file-dragging");
+    });
+    section.addEventListener("dragleave", (event) => {
+      const nextTarget = event.relatedTarget;
+      if (nextTarget instanceof Node && section.contains(nextTarget)) return;
+      section.removeClass("is-file-dragging");
+    });
+    section.addEventListener("drop", (event) => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      section.removeClass("is-file-dragging");
+      this.addPhotoFiles(Array.from(event.dataTransfer?.files ?? []));
+    });
   }
   renderDescriptionSection(parent) {
     const section = this.createSection(parent, "\u6587\u5B57\u8BB0\u5F55", "text-cursor-input");
@@ -34302,6 +34335,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   }
   resetForm() {
     this.currentFile = null;
+    this.refreshTitle();
     this.disposePhotos();
     this.photos = [];
     this.selectedPosts.clear();
@@ -34324,7 +34358,6 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     );
   }
   generateFileName() {
-    if (this.currentFile) return;
     const visitedAt = this.fields.visitedAt.value || todayString();
     const place = this.fields.place.value.trim();
     if (!place) {
@@ -34332,11 +34365,12 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       this.fields.place.focus();
       return;
     }
-    const placePinyin = pinyin(place, {
-      toneType: "none",
-      type: "array",
-      nonZh: "consecutive"
-    }).join("-");
+    const placePinyin = placePinyinSegment(place);
+    if (!placePinyin) {
+      new import_obsidian.Notice("\u5730\u70B9\u65E0\u6CD5\u751F\u6210\u62FC\u97F3\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6587\u4EF6\u540D");
+      this.fields.fileName.focus();
+      return;
+    }
     this.fields.fileName.value = sanitizeSegment(`${visitedAt}-${placePinyin}`);
   }
   setCoordinates(lat, lng, moveMap) {
@@ -34522,13 +34556,18 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.photos.forEach((photo, index) => {
       const card = this.photosEl.createDiv({ cls: "footprint-studio-photo-card" });
       card.draggable = true;
-      card.addEventListener("dragstart", () => {
+      card.addEventListener("dragstart", (event) => {
         this.draggedPhoto = index;
         card.addClass("is-dragging");
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
       });
       card.addEventListener("dragend", () => card.removeClass("is-dragging"));
-      card.addEventListener("dragover", (event) => event.preventDefault());
+      card.addEventListener("dragover", (event) => {
+        if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) return;
+        event.preventDefault();
+      });
       card.addEventListener("drop", (event) => {
+        if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) return;
         event.preventDefault();
         if (this.draggedPhoto < 0 || this.draggedPhoto === index) return;
         const [moved] = this.photos.splice(this.draggedPhoto, 1);
@@ -34681,11 +34720,13 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     button.disabled = true;
     button.addClass("is-loading");
     try {
-      const fileName = this.currentFile?.basename ?? sanitizeSegment(values.fileName);
-      const markdownPath = this.currentFile?.path ?? (0, import_obsidian.normalizePath)(
-        `${this.plugin.settings.footprintsFolder}/${fileName}.md`
+      const fileName = sanitizeSegment(
+        values.fileName.replace(/\.md$/i, "")
       );
-      if (!this.currentFile && this.app.vault.getAbstractFileByPath(markdownPath)) {
+      const markdownFolder = this.currentFile ? this.currentFile.path.split("/").slice(0, -1).join("/") : (0, import_obsidian.normalizePath)(this.plugin.settings.footprintsFolder);
+      const markdownPath = (0, import_obsidian.normalizePath)(`${markdownFolder}/${fileName}.md`);
+      const pathOccupant = this.app.vault.getAbstractFileByPath(markdownPath);
+      if (pathOccupant && pathOccupant.path !== this.currentFile?.path) {
         new import_obsidian.Notice("\u540C\u540D\u8DB3\u8FF9\u5DF2\u7ECF\u5B58\u5728\uFF0C\u8BF7\u4FEE\u6539\u6587\u4EF6\u540D");
         return;
       }
@@ -34714,15 +34755,20 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       let savedFile;
       if (this.currentFile) {
         await this.app.vault.modify(this.currentFile, markdown);
-        savedFile = this.currentFile;
+        if (this.currentFile.path !== markdownPath) {
+          await this.app.vault.rename(this.currentFile, markdownPath);
+        }
+        const renamedFile = this.app.vault.getAbstractFileByPath(markdownPath);
+        savedFile = renamedFile instanceof import_obsidian.TFile ? renamedFile : this.currentFile;
       } else {
         await this.ensureFolder((0, import_obsidian.normalizePath)(this.plugin.settings.footprintsFolder));
         savedFile = await this.app.vault.create(markdownPath, markdown);
       }
       this.currentFile = savedFile;
+      this.refreshTitle();
       this.fields.fileName.value = savedFile.basename;
-      this.fields.fileName.disabled = true;
-      this.fileNameButton.disabled = true;
+      this.fields.fileName.disabled = false;
+      this.fileNameButton.disabled = false;
       this.renderPhotos();
       new import_obsidian.Notice(`\u8DB3\u8FF9\u5DF2\u4FDD\u5B58\uFF1A${savedFile.path}`);
     } catch (error) {
@@ -34783,6 +34829,12 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     }
     lines.push("---", "", values.description, "");
     return lines.join("\n");
+  }
+  refreshTitle() {
+    if (this.headingTitleEl) this.headingTitleEl.textContent = this.getDisplayText();
+    const leaf = this.leaf;
+    leaf.updateHeader?.();
+    this.app.workspace.trigger("layout-change");
   }
   async ensureFolder(path) {
     const parts = (0, import_obsidian.normalizePath)(path).split("/").filter(Boolean);

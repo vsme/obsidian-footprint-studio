@@ -141,6 +141,18 @@ function sanitizeSegment(value: string, fallback = "footprint"): string {
   return safe || fallback;
 }
 
+function placePinyinSegment(value: string): string {
+  return pinyin(value, {
+    toneType: "none",
+    type: "array",
+    nonZh: "consecutive",
+  })
+    .join("")
+    .normalize("NFKC")
+    .replace(/[^a-zA-Z0-9]+/g, "")
+    .toLowerCase();
+}
+
 function stripFrontmatter(markdown: string): string {
   return markdown.replace(/^---\s*\r?\n[\s\S]*?\r?\n---\s*(?:\r?\n)?/, "").trim();
 }
@@ -281,6 +293,7 @@ class FootprintStudioView extends ItemView {
   private selectedPostsEl!: HTMLElement;
   private postSearchInput!: HTMLInputElement;
   private fileNameButton!: HTMLButtonElement;
+  private headingTitleEl!: HTMLHeadingElement;
   private searchResultsEl!: HTMLElement;
   private saving = false;
   private draggedPhoto = -1;
@@ -295,7 +308,7 @@ class FootprintStudioView extends ItemView {
   }
 
   getDisplayText(): string {
-    return this.currentFile ? `编辑足迹 · ${this.currentFile.basename}` : "新建足迹";
+    return this.currentFile?.basename ?? "新建足迹";
   }
 
   getIcon(): string {
@@ -329,9 +342,10 @@ class FootprintStudioView extends ItemView {
     }
 
     this.currentFile = file;
+    this.refreshTitle();
     this.fields.fileName.value = file.basename;
-    this.fields.fileName.disabled = true;
-    this.fileNameButton.disabled = true;
+    this.fields.fileName.disabled = false;
+    this.fileNameButton.disabled = false;
     this.fields.visitedAt.value = dateString(frontmatter.visitedAt);
     this.fields.country.value = String(frontmatter.country ?? "");
     this.fields.region.value = String(frontmatter.region ?? "");
@@ -381,7 +395,7 @@ class FootprintStudioView extends ItemView {
 
     const header = this.contentEl.createDiv({ cls: "footprint-studio-header" });
     const heading = header.createDiv({ cls: "footprint-studio-heading" });
-    heading.createEl("h2", { text: "足迹编辑器" });
+    this.headingTitleEl = heading.createEl("h2", { text: this.getDisplayText() });
     heading.createEl("p", { text: "在地图上标记去向，把照片和当时的文字留在一起。" });
     const actions = header.createDiv({ cls: "footprint-studio-header-actions" });
     const resetButton = makeButton(actions, "新建标签", "file-plus-2");
@@ -516,9 +530,10 @@ class FootprintStudioView extends ItemView {
 
   private renderPhotoSection(parent: HTMLElement): void {
     const section = this.createSection(parent, "照片", "images");
+    section.addClass("footprint-studio-photo-section");
     const intro = section.createDiv({ cls: "footprint-studio-photo-intro" });
     intro.createEl("p", {
-      text: "选择照片后可拖动排序；替代文本会写入 Astro 的 photos 字段。",
+      text: "选择或直接拖入照片；添加后可拖动排序。",
     });
     const picker = makeButton(intro, "选择图片", "image-plus", "mod-cta");
     const input = document.createElement("input");
@@ -533,6 +548,32 @@ class FootprintStudioView extends ItemView {
     section.append(input);
     picker.addEventListener("click", () => input.click());
     this.photosEl = section.createDiv({ cls: "footprint-studio-photo-grid" });
+
+    const containsFiles = (event: DragEvent): boolean =>
+      Array.from(event.dataTransfer?.types ?? []).includes("Files");
+    section.addEventListener("dragenter", event => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      section.addClass("is-file-dragging");
+    });
+    section.addEventListener("dragover", event => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      if (event.dataTransfer) event.dataTransfer.dropEffect = "copy";
+      section.addClass("is-file-dragging");
+    });
+    section.addEventListener("dragleave", event => {
+      const nextTarget = event.relatedTarget;
+      if (nextTarget instanceof Node && section.contains(nextTarget)) return;
+      section.removeClass("is-file-dragging");
+    });
+    section.addEventListener("drop", event => {
+      if (!containsFiles(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      section.removeClass("is-file-dragging");
+      this.addPhotoFiles(Array.from(event.dataTransfer?.files ?? []));
+    });
   }
 
   private renderDescriptionSection(parent: HTMLElement): void {
@@ -573,6 +614,7 @@ class FootprintStudioView extends ItemView {
 
   private resetForm(): void {
     this.currentFile = null;
+    this.refreshTitle();
     this.disposePhotos();
     this.photos = [];
     this.selectedPosts.clear();
@@ -597,7 +639,6 @@ class FootprintStudioView extends ItemView {
   }
 
   private generateFileName(): void {
-    if (this.currentFile) return;
     const visitedAt = this.fields.visitedAt.value || todayString();
     const place = this.fields.place.value.trim();
     if (!place) {
@@ -605,11 +646,12 @@ class FootprintStudioView extends ItemView {
       this.fields.place.focus();
       return;
     }
-    const placePinyin = pinyin(place, {
-      toneType: "none",
-      type: "array",
-      nonZh: "consecutive",
-    }).join("-");
+    const placePinyin = placePinyinSegment(place);
+    if (!placePinyin) {
+      new Notice("地点无法生成拼音，请手动填写文件名");
+      this.fields.fileName.focus();
+      return;
+    }
     this.fields.fileName.value = sanitizeSegment(`${visitedAt}-${placePinyin}`);
   }
 
@@ -831,13 +873,18 @@ class FootprintStudioView extends ItemView {
     this.photos.forEach((photo, index) => {
       const card = this.photosEl.createDiv({ cls: "footprint-studio-photo-card" });
       card.draggable = true;
-      card.addEventListener("dragstart", () => {
+      card.addEventListener("dragstart", event => {
         this.draggedPhoto = index;
         card.addClass("is-dragging");
+        if (event.dataTransfer) event.dataTransfer.effectAllowed = "move";
       });
       card.addEventListener("dragend", () => card.removeClass("is-dragging"));
-      card.addEventListener("dragover", event => event.preventDefault());
+      card.addEventListener("dragover", event => {
+        if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) return;
+        event.preventDefault();
+      });
       card.addEventListener("drop", event => {
+        if (Array.from(event.dataTransfer?.types ?? []).includes("Files")) return;
         event.preventDefault();
         if (this.draggedPhoto < 0 || this.draggedPhoto === index) return;
         const [moved] = this.photos.splice(this.draggedPhoto, 1);
@@ -1011,11 +1058,15 @@ class FootprintStudioView extends ItemView {
     button.disabled = true;
     button.addClass("is-loading");
     try {
-      const fileName = this.currentFile?.basename ?? sanitizeSegment(values.fileName);
-      const markdownPath = this.currentFile?.path ?? normalizePath(
-        `${this.plugin.settings.footprintsFolder}/${fileName}.md`
+      const fileName = sanitizeSegment(
+        values.fileName.replace(/\.md$/i, "")
       );
-      if (!this.currentFile && this.app.vault.getAbstractFileByPath(markdownPath)) {
+      const markdownFolder = this.currentFile
+        ? this.currentFile.path.split("/").slice(0, -1).join("/")
+        : normalizePath(this.plugin.settings.footprintsFolder);
+      const markdownPath = normalizePath(`${markdownFolder}/${fileName}.md`);
+      const pathOccupant = this.app.vault.getAbstractFileByPath(markdownPath);
+      if (pathOccupant && pathOccupant.path !== this.currentFile?.path) {
         new Notice("同名足迹已经存在，请修改文件名");
         return;
       }
@@ -1047,15 +1098,20 @@ class FootprintStudioView extends ItemView {
       let savedFile: TFile;
       if (this.currentFile) {
         await this.app.vault.modify(this.currentFile, markdown);
-        savedFile = this.currentFile;
+        if (this.currentFile.path !== markdownPath) {
+          await this.app.vault.rename(this.currentFile, markdownPath);
+        }
+        const renamedFile = this.app.vault.getAbstractFileByPath(markdownPath);
+        savedFile = renamedFile instanceof TFile ? renamedFile : this.currentFile;
       } else {
         await this.ensureFolder(normalizePath(this.plugin.settings.footprintsFolder));
         savedFile = await this.app.vault.create(markdownPath, markdown);
       }
       this.currentFile = savedFile;
+      this.refreshTitle();
       this.fields.fileName.value = savedFile.basename;
-    this.fields.fileName.disabled = true;
-    this.fileNameButton.disabled = true;
+      this.fields.fileName.disabled = false;
+      this.fileNameButton.disabled = false;
       this.renderPhotos();
       new Notice(`足迹已保存：${savedFile.path}`);
     } catch (error) {
@@ -1131,6 +1187,13 @@ class FootprintStudioView extends ItemView {
     }
     lines.push("---", "", values.description, "");
     return lines.join("\n");
+  }
+
+  private refreshTitle(): void {
+    if (this.headingTitleEl) this.headingTitleEl.textContent = this.getDisplayText();
+    const leaf = this.leaf as WorkspaceLeaf & { updateHeader?: () => void };
+    leaf.updateHeader?.();
+    this.app.workspace.trigger("layout-change");
   }
 
   private async ensureFolder(path: string): Promise<void> {
