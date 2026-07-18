@@ -34458,6 +34458,8 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   constructor(leaf, plugin) {
     super(leaf);
     this.map = null;
+    this.mapResizeObserver = null;
+    this.mapResizeFrame = 0;
     this.marker = null;
     this.savedCoordinates = null;
     this.resetMapButton = null;
@@ -34506,6 +34508,10 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   }
   async onClose() {
     this.disposePhotos();
+    this.mapResizeObserver?.disconnect();
+    this.mapResizeObserver = null;
+    if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+    this.mapResizeFrame = 0;
     this.map?.remove();
     this.map = null;
     this.resetMapButton = null;
@@ -34578,6 +34584,10 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.app.workspace.requestSaveLayout();
   }
   async renderView() {
+    this.mapResizeObserver?.disconnect();
+    this.mapResizeObserver = null;
+    if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+    this.mapResizeFrame = 0;
     this.contentEl.empty();
     this.contentEl.addClass("footprint-studio-view");
     const header = this.contentEl.createDiv({ cls: "footprint-studio-header" });
@@ -34672,6 +34682,14 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       this.map.on("click", (event) => {
         this.setCoordinates(event.latlng.lat, event.latlng.lng, false);
       });
+      this.mapResizeObserver = new ResizeObserver(() => {
+        if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+        this.mapResizeFrame = requestAnimationFrame(() => {
+          this.mapResizeFrame = 0;
+          this.map?.invalidateSize({ pan: false, debounceMoveend: true });
+        });
+      });
+      this.mapResizeObserver.observe(mapHost);
       setTimeout(() => this.map?.invalidateSize(), 0);
     });
   }

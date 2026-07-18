@@ -838,6 +838,8 @@ export default class FootprintStudioPlugin extends Plugin {
 class FootprintStudioView extends ItemView {
   private plugin: FootprintStudioPlugin;
   private map: L.Map | null = null;
+  private mapResizeObserver: ResizeObserver | null = null;
+  private mapResizeFrame = 0;
   private marker: L.Marker | null = null;
   private savedCoordinates: PhotoGpsCoordinates | null = null;
   private resetMapButton: HTMLAnchorElement | null = null;
@@ -908,6 +910,10 @@ class FootprintStudioView extends ItemView {
 
   async onClose(): Promise<void> {
     this.disposePhotos();
+    this.mapResizeObserver?.disconnect();
+    this.mapResizeObserver = null;
+    if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+    this.mapResizeFrame = 0;
     this.map?.remove();
     this.map = null;
     this.resetMapButton = null;
@@ -996,6 +1002,10 @@ class FootprintStudioView extends ItemView {
   }
 
   private async renderView(): Promise<void> {
+    this.mapResizeObserver?.disconnect();
+    this.mapResizeObserver = null;
+    if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+    this.mapResizeFrame = 0;
     this.contentEl.empty();
     this.contentEl.addClass("footprint-studio-view");
 
@@ -1103,6 +1113,14 @@ class FootprintStudioView extends ItemView {
       this.map.on("click", event => {
         this.setCoordinates(event.latlng.lat, event.latlng.lng, false);
       });
+      this.mapResizeObserver = new ResizeObserver(() => {
+        if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+        this.mapResizeFrame = requestAnimationFrame(() => {
+          this.mapResizeFrame = 0;
+          this.map?.invalidateSize({ pan: false, debounceMoveend: true });
+        });
+      });
+      this.mapResizeObserver.observe(mapHost);
       setTimeout(() => this.map?.invalidateSize(), 0);
     });
   }
