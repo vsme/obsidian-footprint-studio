@@ -36422,7 +36422,7 @@ function overviewMarkerHtml(cover, count, hasDraft, clustered = false) {
     text: String(Math.max(1, count))
   });
   if (hasDraft) {
-    marker2.createSpan({ cls: "footprint-overview-marker-draft", text: "\u8349" });
+    marker2.createSpan({ cls: "footprint-overview-marker-draft", text: "\u7A3F" });
   }
   return marker2.outerHTML;
 }
@@ -36786,6 +36786,12 @@ var FootprintOverviewView = class extends import_obsidian.ItemView {
       "click",
       () => void this.plugin.openStudio(record.file)
     );
+    if (record.note) {
+      article.createEl("p", {
+        cls: "footprint-overview-note",
+        text: record.note
+      });
+    }
     if (record.relatedPosts.length) {
       const related = article.createDiv({
         cls: "footprint-overview-related-posts"
@@ -36853,12 +36859,6 @@ var FootprintOverviewView = class extends import_obsidian.ItemView {
           ).open();
         });
       }
-    }
-    if (record.note) {
-      article.createEl("p", {
-        cls: "footprint-overview-note",
-        text: record.note
-      });
     }
   }
   async openRelatedPost(post) {
@@ -37128,9 +37128,8 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     const header = this.contentEl.createDiv({ cls: "footprint-studio-header" });
     const heading = header.createDiv({ cls: "footprint-studio-heading" });
     this.headingTitleEl = heading.createEl("h2", { text: this.getDisplayText() });
-    heading.createEl("p", { text: "\u5728\u5730\u56FE\u4E0A\u6807\u8BB0\u53BB\u5411\uFF0C\u628A\u7167\u7247\u548C\u5F53\u65F6\u7684\u6587\u5B57\u7559\u5728\u4E00\u8D77\u3002" });
     const actions = header.createDiv({ cls: "footprint-studio-header-actions" });
-    const resetButton = makeButton(actions, "\u65B0\u5EFA\u6807\u7B7E", "file-plus-2");
+    const resetButton = makeButton(actions, "\u65B0\u5EFA\u8DB3\u8FF9", "file-plus-2");
     resetButton.addEventListener("click", () => void this.plugin.openStudio());
     const saveButton = makeButton(actions, "\u4FDD\u5B58\u8DB3\u8FF9", "save", "mod-cta");
     saveButton.addEventListener("click", () => void this.saveFootprint(saveButton));

@@ -937,7 +937,7 @@ function overviewMarkerHtml(
     text: String(Math.max(1, count)),
   });
   if (hasDraft) {
-    marker.createSpan({ cls: "footprint-overview-marker-draft", text: "草" });
+    marker.createSpan({ cls: "footprint-overview-marker-draft", text: "稿" });
   }
   return marker.outerHTML;
 }
@@ -1368,6 +1368,13 @@ class FootprintOverviewView extends ItemView {
       () => void this.plugin.openStudio(record.file)
     );
 
+    if (record.note) {
+      article.createEl("p", {
+        cls: "footprint-overview-note",
+        text: record.note,
+      });
+    }
+
     if (record.relatedPosts.length) {
       const related = article.createDiv({
         cls: "footprint-overview-related-posts",
@@ -1443,12 +1450,6 @@ class FootprintOverviewView extends ItemView {
       }
     }
 
-    if (record.note) {
-      article.createEl("p", {
-        cls: "footprint-overview-note",
-        text: record.note,
-      });
-    }
   }
 
   private async openRelatedPost(post: FootprintOverviewPost): Promise<void> {
@@ -1800,9 +1801,8 @@ class FootprintStudioView extends ItemView {
     const header = this.contentEl.createDiv({ cls: "footprint-studio-header" });
     const heading = header.createDiv({ cls: "footprint-studio-heading" });
     this.headingTitleEl = heading.createEl("h2", { text: this.getDisplayText() });
-    heading.createEl("p", { text: "在地图上标记去向，把照片和当时的文字留在一起。" });
     const actions = header.createDiv({ cls: "footprint-studio-header-actions" });
-    const resetButton = makeButton(actions, "新建标签", "file-plus-2");
+    const resetButton = makeButton(actions, "新建足迹", "file-plus-2");
     resetButton.addEventListener("click", () => void this.plugin.openStudio());
     const saveButton = makeButton(actions, "保存足迹", "save", "mod-cta");
     saveButton.addEventListener("click", () => void this.saveFootprint(saveButton));

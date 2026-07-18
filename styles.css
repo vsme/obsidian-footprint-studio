@@ -248,26 +248,51 @@
 .footprint-studio-view {
   --footprint-studio-radius: 14px;
   --footprint-studio-gap: 16px;
+  --footprint-studio-page-padding: clamp(16px, 2.5vw, 28px);
   height: 100%;
-  padding: clamp(16px, 2.5vw, 28px);
+  padding: var(--footprint-studio-page-padding);
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--background-primary);
 }
 
 .footprint-studio-header {
+  position: sticky;
+  top: 0;
+  z-index: 1200;
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 20px;
   max-width: 1480px;
-  margin: 0 auto 18px;
+  margin: 0 auto 12px;
+  padding: 10px 0 12px;
+  background: var(--background-primary);
+  box-shadow: 0 1px 0 var(--background-modifier-border);
+}
+
+.footprint-studio-header::before {
+  position: absolute;
+  right: 0;
+  bottom: 100%;
+  left: 0;
+  height: var(--footprint-studio-page-padding);
+  background: var(--background-primary);
+  content: "";
+  pointer-events: none;
+}
+
+.footprint-studio-heading {
+  min-width: 0;
 }
 
 .footprint-studio-heading h2 {
   margin: 0;
+  overflow: hidden;
   font-size: 1.55rem;
   letter-spacing: -0.025em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .footprint-studio-heading p {
@@ -1471,7 +1496,7 @@
 
 .footprint-overview-heading h2 {
   margin: 0;
-  font-size: 1.45rem;
+  font-size: 1.2rem;
   letter-spacing: -0.02em;
 }
 
@@ -1792,7 +1817,7 @@
 
 .footprint-overview-note {
   display: -webkit-box;
-  margin: 10px 0 0;
+  margin: 0 0 10px;
   overflow: hidden;
   color: var(--text-muted);
   font-size: var(--font-ui-smaller);
@@ -1911,7 +1936,7 @@
   }
 
   .footprint-overview-heading h2 {
-    font-size: 1.2rem;
+    font-size: 1.08rem;
   }
 
   .footprint-overview-actions button span:last-child {
