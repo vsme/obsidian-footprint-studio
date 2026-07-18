@@ -185,6 +185,49 @@
   background: var(--background-secondary);
 }
 
+.footprint-overview-map-controls {
+  position: absolute;
+  z-index: 1000;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  overflow: hidden;
+  border: 1px solid var(--background-modifier-border-hover);
+  border-radius: 8px;
+  background: var(--background-primary);
+  box-shadow: var(--shadow-s);
+}
+
+.footprint-overview-map-controls button {
+  display: flex;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  color: var(--text-normal);
+  border: 0;
+  border-right: 1px solid var(--background-modifier-border);
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.footprint-overview-map-controls button:last-child {
+  border-right: 0;
+}
+
+.footprint-overview-map-controls button:hover {
+  color: var(--text-accent);
+  background: var(--background-secondary);
+}
+
+.footprint-overview-map-controls svg {
+  width: 15px;
+  height: 15px;
+  stroke-width: 1.8;
+}
+
 .footprint-studio-view .leaflet-control-attribution {
   padding: 2px 5px;
   color: var(--text-muted);
@@ -1247,6 +1290,9 @@
   box-shadow: 0 5px 18px rgba(0, 0, 0, 0.24);
   backdrop-filter: blur(10px);
   pointer-events: auto;
+  cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .footprint-studio-photo-editor[hidden] {
@@ -1263,6 +1309,8 @@
   box-shadow: none;
   font-size: var(--font-ui-smaller);
   cursor: text;
+  user-select: text;
+  -webkit-user-select: text;
 }
 
 .footprint-studio-photo-editor input:focus {
@@ -1398,5 +1446,497 @@
   .footprint-studio-photo-intro {
     align-items: flex-start;
     flex-direction: column;
+  }
+}
+
+/* Footprint overview */
+.footprint-overview-view {
+  display: flex;
+  height: 100%;
+  min-height: 0;
+  padding: clamp(12px, 2vw, 22px);
+  overflow: hidden;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.footprint-overview-header {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.footprint-overview-heading h2 {
+  margin: 0;
+  font-size: 1.45rem;
+  letter-spacing: -0.02em;
+}
+
+.footprint-overview-heading p {
+  margin: 4px 0 0;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+}
+
+.footprint-overview-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.footprint-overview-actions button,
+.footprint-overview-record-header button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+
+.footprint-overview-shell {
+  position: relative;
+  display: flex;
+  width: 100%;
+  min-height: 340px;
+  overflow: hidden;
+  flex: 1;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 16px;
+  background: var(--background-secondary);
+}
+
+.footprint-overview-view .footprint-overview-map {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  flex: 1 1 auto;
+}
+
+.footprint-overview-empty {
+  position: absolute;
+  z-index: 900;
+  top: 50%;
+  left: 50%;
+  padding: 10px 14px;
+  transform: translate(-50%, -50%);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--background-primary) 90%, transparent);
+  box-shadow: var(--shadow-s);
+  pointer-events: none;
+}
+
+.footprint-overview-panel {
+  position: absolute;
+  z-index: 1200;
+  top: 12px;
+  right: 12px;
+  bottom: 12px;
+  display: flex;
+  width: min(340px, calc(100% - 24px));
+  min-width: 0;
+  overflow: hidden;
+  transform: translateX(calc(100% + 24px));
+  opacity: 0;
+  flex-direction: column;
+  border: 1px solid var(--background-modifier-border-hover);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--background-primary) 96%, transparent);
+  box-shadow: var(--shadow-l);
+  pointer-events: none;
+  transition:
+    transform 180ms ease,
+    opacity 140ms ease;
+  backdrop-filter: blur(16px);
+}
+
+.footprint-overview-panel.is-open {
+  transform: translateX(0);
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.footprint-overview-panel-header {
+  display: flex;
+  min-height: 50px;
+  padding: 0 10px 0 14px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.footprint-overview-panel-header h3 {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font-size: var(--font-ui-medium);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footprint-overview-panel-close {
+  display: inline-flex;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
+}
+
+.footprint-overview-panel-body {
+  min-height: 0;
+  padding: 14px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+}
+
+.footprint-overview-record + .footprint-overview-record {
+  margin-top: 18px;
+  padding-top: 18px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.footprint-overview-record-header {
+  display: flex;
+  margin-bottom: 12px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.footprint-overview-record-copy {
+  min-width: 0;
+}
+
+.footprint-overview-record-copy h4 {
+  display: flex;
+  margin: 0;
+  align-items: center;
+  gap: 7px;
+  color: var(--text-normal);
+  font-size: var(--font-ui-medium);
+}
+
+.footprint-overview-record-copy p {
+  margin: 4px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footprint-overview-draft-badge {
+  display: inline-flex;
+  padding: 2px 6px;
+  align-items: center;
+  color: var(--color-orange);
+  font-size: 9px;
+  font-weight: 600;
+  border: 1px solid color-mix(in srgb, var(--color-orange) 48%, transparent);
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--color-orange) 12%, transparent);
+}
+
+.footprint-overview-related-posts {
+  margin-bottom: 10px;
+}
+
+.footprint-overview-related-label {
+  display: flex;
+  margin-bottom: 5px;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-size: 10px;
+}
+
+.footprint-overview-related-label svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.8;
+}
+
+.footprint-overview-related-list {
+  display: grid;
+  gap: 3px;
+}
+
+.footprint-overview-related-list button {
+  display: flex;
+  width: 100%;
+  min-width: 0;
+  height: auto;
+  padding: 5px 7px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--text-normal);
+  font-size: 11px;
+  text-align: left;
+  border: 0;
+  border-radius: 6px;
+  background: color-mix(
+    in srgb,
+    var(--background-secondary) 72%,
+    transparent
+  );
+  box-shadow: none;
+}
+
+.footprint-overview-related-list button > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.footprint-overview-related-list button:hover:not(:disabled) {
+  color: var(--text-accent);
+  background: var(--background-modifier-hover);
+}
+
+.footprint-overview-related-list button:not(:disabled) {
+  cursor: pointer;
+}
+
+.footprint-overview-related-list button:disabled {
+  opacity: 0.55;
+}
+
+.footprint-overview-related-arrow {
+  display: inline-flex;
+  flex: 0 0 auto;
+}
+
+.footprint-overview-related-arrow svg {
+  width: 12px;
+  height: 12px;
+  stroke-width: 1.8;
+}
+
+.footprint-overview-photos {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.footprint-overview-photos.is-four {
+  width: calc(66.6667% - 1.6667px);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.footprint-overview-photo {
+  position: relative;
+  display: block;
+  width: 100%;
+  height: auto;
+  max-width: none;
+  aspect-ratio: 1;
+  min-width: 0;
+  padding: 0;
+  overflow: hidden;
+  justify-self: stretch;
+  border: 0;
+  border-radius: 4px;
+  background: var(--background-secondary);
+  box-shadow: none;
+}
+
+.footprint-overview-photo img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  transition: transform 160ms ease;
+}
+
+.footprint-overview-photo:hover img {
+  transform: scale(1.035);
+}
+
+.footprint-overview-photo.is-hidden img {
+  opacity: 0.58;
+}
+
+.footprint-overview-photo-hidden {
+  position: absolute;
+  right: 4px;
+  bottom: 4px;
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  border-radius: 999px;
+  background: rgba(20, 22, 26, 0.72);
+}
+
+.footprint-overview-photo-hidden svg {
+  width: 12px;
+  height: 12px;
+}
+
+.footprint-overview-note {
+  display: -webkit-box;
+  margin: 10px 0 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.55;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.footprint-overview-map-icon {
+  background: transparent;
+  border: 0;
+}
+
+.footprint-overview-marker {
+  position: relative;
+  width: 40px;
+  height: 48px;
+}
+
+.footprint-overview-marker::after {
+  position: absolute;
+  z-index: -1;
+  bottom: 3px;
+  left: 17px;
+  width: 8px;
+  height: 8px;
+  content: "";
+  transform: rotate(45deg);
+  border-right: 1px solid color-mix(in srgb, var(--text-normal) 45%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--text-normal) 45%, transparent);
+  background: var(--background-primary);
+}
+
+.footprint-overview-marker-visual {
+  display: flex;
+  width: 40px;
+  height: 40px;
+  overflow: hidden;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid color-mix(in srgb, var(--text-normal) 52%, transparent);
+  border-radius: 8px;
+  background: var(--background-primary);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.28);
+}
+
+.footprint-overview-marker-visual img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.footprint-overview-marker-fallback {
+  display: inline-flex;
+  color: var(--text-muted);
+}
+
+.footprint-overview-marker-fallback svg {
+  width: 17px;
+  height: 17px;
+}
+
+.footprint-overview-marker-count,
+.footprint-overview-marker-draft {
+  position: absolute;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 700;
+  border-radius: 999px;
+  box-shadow: 0 1px 5px rgba(0, 0, 0, 0.34);
+}
+
+.footprint-overview-marker-count {
+  top: -7px;
+  right: -7px;
+  min-width: 19px;
+  height: 19px;
+  padding: 0 5px;
+  font-size: 9px;
+  background: var(--interactive-accent);
+}
+
+.footprint-overview-marker-draft {
+  bottom: 5px;
+  left: -7px;
+  width: 18px;
+  height: 18px;
+  font-size: 8px;
+  background: var(--color-orange);
+}
+
+.footprint-overview-marker.is-draft .footprint-overview-marker-visual {
+  border-color: var(--color-orange);
+  box-shadow:
+    0 0 0 2px color-mix(in srgb, var(--color-orange) 36%, transparent),
+    0 4px 12px rgba(0, 0, 0, 0.28);
+}
+
+.footprint-overview-marker.is-cluster {
+  transform: scale(1.06);
+}
+
+.footprint-overview-view .leaflet-cluster-anim .leaflet-marker-icon,
+.footprint-overview-view .leaflet-zoom-animated {
+  transition: transform 180ms ease;
+}
+
+@media (max-width: 700px) {
+  .footprint-overview-view {
+    padding: 10px;
+    gap: 10px;
+  }
+
+  .footprint-overview-heading h2 {
+    font-size: 1.2rem;
+  }
+
+  .footprint-overview-actions button span:last-child {
+    display: none;
+  }
+
+  .footprint-overview-panel {
+    top: auto;
+    right: 8px;
+    bottom: 8px;
+    left: 8px;
+    width: auto;
+    height: min(52%, 420px);
+    transform: translateY(calc(100% + 16px));
+  }
+
+  .footprint-overview-panel.is-open {
+    transform: translateY(0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .footprint-overview-panel,
+  .footprint-overview-photo img,
+  .footprint-overview-view .leaflet-marker-icon {
+    transition: none;
   }
 }

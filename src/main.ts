@@ -15,9 +15,11 @@ import {
   setIcon,
 } from "obsidian";
 import * as L from "leaflet";
+import "leaflet.markercluster";
 import { pinyin } from "pinyin-pro";
 
 const VIEW_TYPE = "footprint-studio-view";
+const OVERVIEW_VIEW_TYPE = "footprint-studio-overview-view";
 const MAP_HEIGHT_MIN = 300;
 const MAP_HEIGHT_MAX = 680;
 const MAP_HEIGHT_DEFAULT = 380;
@@ -438,6 +440,41 @@ interface BlogPostOption {
   keywords: string[];
 }
 
+interface FootprintOverviewPhoto {
+  source: string;
+  previewUrl: string;
+  alt: string;
+  caption: string;
+  hidden: boolean;
+}
+
+interface FootprintOverviewPost {
+  id: string;
+  title: string;
+  file: TFile | null;
+}
+
+interface FootprintOverviewRecord {
+  file: TFile;
+  visitedAt: string;
+  country: string;
+  region: string;
+  city: string;
+  place: string;
+  lat: number;
+  lng: number;
+  draft: boolean;
+  photos: FootprintOverviewPhoto[];
+  relatedPosts: FootprintOverviewPost[];
+  note: string;
+}
+
+interface FootprintOverviewGroup {
+  lat: number;
+  lng: number;
+  records: FootprintOverviewRecord[];
+}
+
 interface NominatimAddress {
   country?: string;
   state?: string;
@@ -635,6 +672,10 @@ export default class FootprintStudioPlugin extends Plugin {
     this.settings.mapHeight = normalizeMapHeight(this.settings.mapHeight);
 
     this.registerView(VIEW_TYPE, leaf => new FootprintStudioView(leaf, this));
+    this.registerView(
+      OVERVIEW_VIEW_TYPE,
+      leaf => new FootprintOverviewView(leaf, this)
+    );
     this.app.workspace.onLayoutReady(() => {
       this.app.workspace.iterateAllLeaves(leaf => this.knownLeaves.add(leaf));
       this.registerEvent(
@@ -656,14 +697,14 @@ export default class FootprintStudioPlugin extends Plugin {
         })
       );
     });
-    this.addRibbonIcon("map-pinned", "新建足迹", () => void this.openStudio());
-    this.addRibbonIcon("square-pen", "编辑当前足迹", () => {
-      const activeFile = this.app.workspace.getActiveFile();
-      if (!this.isFootprintFile(activeFile)) {
-        new Notice("请先打开一篇足迹 Markdown");
-        return;
-      }
-      void this.openStudio(activeFile);
+    this.addRibbonIcon("map-pinned", "足迹总览", () =>
+      void this.openOverview()
+    );
+
+    this.addCommand({
+      id: "open-footprint-overview",
+      name: "打开足迹总览",
+      callback: () => this.openOverview(),
     });
 
     this.addCommand({
@@ -707,7 +748,9 @@ export default class FootprintStudioPlugin extends Plugin {
 
   async onunload(): Promise<void> {
     await Promise.all(
-      this.app.workspace.getLeavesOfType(VIEW_TYPE).map(leaf => leaf.detach())
+      [VIEW_TYPE, OVERVIEW_VIEW_TYPE].flatMap(type =>
+        this.app.workspace.getLeavesOfType(type).map(leaf => leaf.detach())
+      )
     );
   }
 
@@ -832,6 +875,751 @@ export default class FootprintStudioPlugin extends Plugin {
     ) {
       await view.openFile(file ?? null);
     }
+  }
+
+  async openOverview(): Promise<void> {
+    const existingLeaf = this.app.workspace.getLeavesOfType(OVERVIEW_VIEW_TYPE)[0];
+    if (existingLeaf) {
+      this.app.workspace.revealLeaf(existingLeaf);
+      if (existingLeaf.view instanceof FootprintOverviewView) {
+        await existingLeaf.view.refresh();
+      }
+      return;
+    }
+
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({
+      type: OVERVIEW_VIEW_TYPE,
+      active: true,
+    });
+    this.app.workspace.revealLeaf(leaf);
+  }
+}
+
+function overviewDateLabel(value: string): string {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!match) return value;
+  return (
+    Number(match[1]) +
+    "年" +
+    Number(match[2]) +
+    "月" +
+    Number(match[3]) +
+    "日"
+  );
+}
+
+function overviewMarkerHtml(
+  cover: string,
+  count: number,
+  hasDraft: boolean,
+  clustered = false
+): string {
+  const marker = document.createElement("div");
+  marker.className = [
+    "footprint-overview-marker",
+    hasDraft ? "is-draft" : "",
+    clustered ? "is-cluster" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  const visual = marker.createDiv({ cls: "footprint-overview-marker-visual" });
+  if (cover) {
+    visual.createEl("img", { attr: { src: cover, alt: "" } });
+  } else {
+    const fallback = visual.createSpan({
+      cls: "footprint-overview-marker-fallback",
+    });
+    setIcon(fallback, "image");
+  }
+  marker.createSpan({
+    cls: "footprint-overview-marker-count",
+    text: String(Math.max(1, count)),
+  });
+  if (hasDraft) {
+    marker.createSpan({ cls: "footprint-overview-marker-draft", text: "草" });
+  }
+  return marker.outerHTML;
+}
+
+function groupNearbyFootprints(
+  records: FootprintOverviewRecord[],
+  distance = 30
+): FootprintOverviewGroup[] {
+  const earthRadius = 6_378_137;
+  const cellSize = distance;
+  const groups: Array<FootprintOverviewGroup & { x: number; y: number }> = [];
+  const buckets = new Map<string, number[]>();
+  const project = (lat: number, lng: number) => ({
+    x: (earthRadius * lng * Math.PI) / 180,
+    y:
+      earthRadius *
+      Math.log(Math.tan(Math.PI / 4 + (lat * Math.PI) / 360)),
+  });
+
+  for (const record of records) {
+    const point = project(record.lat, record.lng);
+    const latitudeScale = Math.max(
+      Math.cos((record.lat * Math.PI) / 180),
+      0.18
+    );
+    const projectedDistance = distance / latitudeScale;
+    const bucketX = Math.floor(point.x / cellSize);
+    const bucketY = Math.floor(point.y / cellSize);
+    const radius = Math.ceil(projectedDistance / cellSize);
+    let matchedIndex = -1;
+
+    for (
+      let offsetX = -radius;
+      offsetX <= radius && matchedIndex < 0;
+      offsetX += 1
+    ) {
+      for (let offsetY = -radius; offsetY <= radius; offsetY += 1) {
+        const key = bucketX + offsetX + ":" + (bucketY + offsetY);
+        const candidates = buckets.get(key) ?? [];
+        matchedIndex =
+          candidates.find(index => {
+            const group = groups[index];
+            return (
+              Math.hypot(group.x - point.x, group.y - point.y) <=
+              projectedDistance
+            );
+          }) ?? -1;
+        if (matchedIndex >= 0) break;
+      }
+    }
+
+    if (matchedIndex >= 0) {
+      groups[matchedIndex].records.push(record);
+      continue;
+    }
+
+    const groupIndex = groups.length;
+    groups.push({
+      lat: record.lat,
+      lng: record.lng,
+      x: point.x,
+      y: point.y,
+      records: [record],
+    });
+    const key = bucketX + ":" + bucketY;
+    const bucket = buckets.get(key) ?? [];
+    bucket.push(groupIndex);
+    buckets.set(key, bucket);
+  }
+
+  return groups.map(({ lat, lng, records: groupRecords }) => ({
+    lat,
+    lng,
+    records: groupRecords,
+  }));
+}
+
+class FootprintOverviewView extends ItemView {
+  private plugin: FootprintStudioPlugin;
+  private map: L.Map | null = null;
+  private clusters: L.MarkerClusterGroup | null = null;
+  private markerGroups = new WeakMap<L.Marker, FootprintOverviewGroup>();
+  private resizeObserver: ResizeObserver | null = null;
+  private resizeFrame = 0;
+  private refreshTimer = 0;
+  private refreshRequest = 0;
+  private records: FootprintOverviewRecord[] = [];
+  private groups: FootprintOverviewGroup[] = [];
+  private selectedGroup: FootprintOverviewGroup | null = null;
+  private summaryEl!: HTMLElement;
+  private mapEl!: HTMLElement;
+  private panelEl!: HTMLElement;
+  private panelTitleEl!: HTMLElement;
+  private panelBodyEl!: HTMLElement;
+  private emptyEl!: HTMLElement;
+
+  constructor(leaf: WorkspaceLeaf, plugin: FootprintStudioPlugin) {
+    super(leaf);
+    this.plugin = plugin;
+  }
+
+  getViewType(): string {
+    return OVERVIEW_VIEW_TYPE;
+  }
+
+  getDisplayText(): string {
+    return "足迹总览";
+  }
+
+  getIcon(): string {
+    return "map";
+  }
+
+  async onOpen(): Promise<void> {
+    this.renderView();
+    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    this.createMap();
+    await this.refresh(true);
+
+    const schedule = (file: TFile) => {
+      if (this.isFootprintFile(file)) this.scheduleRefresh();
+    };
+    this.registerEvent(
+      this.app.metadataCache.on("changed", file => schedule(file))
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", file => {
+        if (file instanceof TFile && this.isFootprintFile(file)) {
+          this.scheduleRefresh();
+        }
+      })
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", (file, oldPath) => {
+        const prefix =
+          normalizePath(this.plugin.settings.footprintsFolder) + "/";
+        if (
+          (file instanceof TFile && this.isFootprintFile(file)) ||
+          oldPath.startsWith(prefix)
+        ) {
+          this.scheduleRefresh();
+        }
+      })
+    );
+  }
+
+  async onClose(): Promise<void> {
+    if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = 0;
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    if (this.resizeFrame) cancelAnimationFrame(this.resizeFrame);
+    this.resizeFrame = 0;
+    this.clusters?.clearLayers();
+    this.clusters = null;
+    this.map?.remove();
+    this.map = null;
+  }
+
+  async refresh(fitBounds = false): Promise<void> {
+    const request = ++this.refreshRequest;
+    const records = await this.loadRecords();
+    if (request !== this.refreshRequest) return;
+    this.records = records;
+    this.groups = groupNearbyFootprints(records, 30);
+    const draftCount = records.filter(record => record.draft).length;
+    this.summaryEl.textContent =
+      records.length + " 个足迹 · " + draftCount + " 个草稿";
+    this.renderMarkers(fitBounds);
+
+    if (this.selectedGroup) {
+      const selectedPaths = new Set(
+        this.selectedGroup.records.map(record => record.file.path)
+      );
+      const refreshedGroup = this.groups.find(group =>
+        group.records.some(record => selectedPaths.has(record.file.path))
+      );
+      if (refreshedGroup) this.selectGroup(refreshedGroup);
+      else this.closePanel();
+    }
+  }
+
+  private renderView(): void {
+    this.contentEl.empty();
+    this.contentEl.addClass(
+      "footprint-studio-view",
+      "footprint-overview-view"
+    );
+    const header = this.contentEl.createDiv({
+      cls: "footprint-overview-header",
+    });
+    const heading = header.createDiv({ cls: "footprint-overview-heading" });
+    heading.createEl("h2", { text: "全部足迹" });
+    this.summaryEl = heading.createEl("p", { text: "正在读取足迹…" });
+    const actions = header.createDiv({ cls: "footprint-overview-actions" });
+    const refreshButton = makeButton(actions, "刷新", "refresh-cw");
+    refreshButton.addEventListener("click", () => void this.refresh());
+    const newButton = makeButton(actions, "新建足迹", "plus", "mod-cta");
+    newButton.addEventListener("click", () => void this.plugin.openStudio());
+
+    const shell = this.contentEl.createDiv({
+      cls: "footprint-overview-shell",
+    });
+    this.mapEl = shell.createDiv({ cls: "footprint-overview-map" });
+    this.mapEl.setAttribute("aria-label", "全部足迹地图");
+    this.emptyEl = shell.createDiv({
+      cls: "footprint-overview-empty",
+      text: "足迹目录中还没有可定位的记录。",
+    });
+    this.emptyEl.hidden = true;
+
+    this.panelEl = shell.createEl("aside", {
+      cls: "footprint-overview-panel",
+      attr: { "aria-hidden": "true" },
+    });
+    this.panelEl.inert = true;
+    const panelHeader = this.panelEl.createDiv({
+      cls: "footprint-overview-panel-header",
+    });
+    this.panelTitleEl = panelHeader.createEl("h3", { text: "足迹详情" });
+    const closeButton = panelHeader.createEl("button", {
+      cls: "footprint-overview-panel-close",
+      attr: {
+        type: "button",
+        "aria-label": "关闭详情",
+        title: "关闭详情",
+      },
+    });
+    setIcon(closeButton, "x");
+    closeButton.addEventListener("click", () => this.closePanel());
+    this.registerDomEvent(this.contentEl, "keydown", event => {
+      if (event.key === "Escape" && this.selectedGroup) this.closePanel();
+    });
+    this.panelBodyEl = this.panelEl.createDiv({
+      cls: "footprint-overview-panel-body",
+    });
+  }
+
+  private createMap(): void {
+    this.map = L.map(this.mapEl, {
+      zoomControl: false,
+      scrollWheelZoom: true,
+      attributionControl: true,
+    }).setView(
+      [this.plugin.settings.defaultLat, this.plugin.settings.defaultLng],
+      this.plugin.settings.defaultZoom
+    );
+    const controls = this.mapEl.createDiv({
+      cls: "footprint-overview-map-controls",
+    });
+    const addControl = (label: string, icon: string, action: () => void) => {
+      const button = controls.createEl("button", {
+        attr: { type: "button", "aria-label": label, title: label },
+      });
+      setIcon(button, icon);
+      button.addEventListener("click", event => {
+        event.preventDefault();
+        event.stopPropagation();
+        action();
+      });
+    };
+    addControl("返回初始视图", "home", () => this.fitOverviewView());
+    addControl("放大", "plus", () => this.map?.zoomIn());
+    addControl("缩小", "minus", () => this.map?.zoomOut());
+    L.DomEvent.disableClickPropagation(controls);
+    L.DomEvent.disableScrollPropagation(controls);
+    L.tileLayer(this.plugin.settings.tileUrl, {
+      maxZoom: 19,
+      attribution: "© OpenStreetMap contributors",
+    }).addTo(this.map);
+    const leafletRuntime =
+      (L as unknown as { default?: typeof L }).default ?? L;
+    if (!leafletRuntime?.markerClusterGroup) {
+      throw new Error("Leaflet MarkerCluster 未正确加载");
+    }
+    this.clusters = leafletRuntime.markerClusterGroup({
+      showCoverageOnHover: false,
+      zoomToBoundsOnClick: true,
+      spiderfyOnMaxZoom: false,
+      removeOutsideVisibleBounds: true,
+      maxClusterRadius: 52,
+      disableClusteringAtZoom: 17,
+      iconCreateFunction: cluster => {
+        const childMarkers = cluster.getAllChildMarkers();
+        const groups = childMarkers
+          .map(marker => this.markerGroups.get(marker))
+          .filter((group): group is FootprintOverviewGroup => Boolean(group));
+        const records = groups.flatMap(group => group.records);
+        const cover = this.coverOf(records);
+        const photoCount = records.reduce(
+          (total, record) => total + record.photos.length,
+          0
+        );
+        return L.divIcon({
+          className: "footprint-overview-map-icon",
+          html: overviewMarkerHtml(
+            cover,
+            photoCount || records.length,
+            records.some(record => record.draft),
+            true
+          ),
+          iconSize: [46, 53],
+          iconAnchor: [23, 52],
+        });
+      },
+    });
+    this.clusters.addTo(this.map);
+    this.map.on("click", () => this.closePanel());
+
+    this.resizeObserver = new ResizeObserver(() => {
+      if (this.resizeFrame) cancelAnimationFrame(this.resizeFrame);
+      this.resizeFrame = requestAnimationFrame(() => {
+        this.resizeFrame = 0;
+        this.map?.invalidateSize({ pan: false, debounceMoveend: true });
+      });
+    });
+    this.resizeObserver.observe(this.mapEl);
+  }
+
+  private renderMarkers(fitBounds: boolean): void {
+    if (!this.map || !this.clusters) return;
+    this.clusters.clearLayers();
+    this.markerGroups = new WeakMap<L.Marker, FootprintOverviewGroup>();
+
+    for (const group of this.groups) {
+      const records = group.records;
+      const photoCount = records.reduce(
+        (total, record) => total + record.photos.length,
+        0
+      );
+      const icon = L.divIcon({
+        className: "footprint-overview-map-icon",
+        html: overviewMarkerHtml(
+          this.coverOf(records),
+          photoCount || records.length,
+          records.some(record => record.draft)
+        ),
+        iconSize: [44, 51],
+        iconAnchor: [22, 50],
+      });
+      const marker = L.marker([group.lat, group.lng], {
+        icon,
+        title:
+          records.length > 1
+            ? records.length + " 条同地点足迹"
+            : records[0].place +
+              " · " +
+              overviewDateLabel(records[0].visitedAt),
+        riseOnHover: true,
+        keyboard: true,
+      });
+      marker.on("click", () => this.selectGroup(group));
+      this.markerGroups.set(marker, group);
+      this.clusters.addLayer(marker);
+    }
+
+    this.emptyEl.hidden = this.groups.length > 0;
+    if (fitBounds) this.fitOverviewView();
+  }
+
+  private fitOverviewView(): void {
+    if (!this.map) return;
+    this.closePanel();
+    if (this.groups.length > 1) {
+      const bounds = L.latLngBounds(
+        this.groups.map(group => [group.lat, group.lng] as L.LatLngTuple)
+      );
+      this.map.fitBounds(bounds, { padding: [52, 52], maxZoom: 8 });
+    } else if (this.groups.length === 1) {
+      this.map.setView([this.groups[0].lat, this.groups[0].lng], 12);
+    } else {
+      this.map.setView(
+        [this.plugin.settings.defaultLat, this.plugin.settings.defaultLng],
+        this.plugin.settings.defaultZoom
+      );
+    }
+  }
+
+  private selectGroup(group: FootprintOverviewGroup): void {
+    this.selectedGroup = group;
+    const records = [...group.records].sort((a, b) =>
+      b.visitedAt.localeCompare(a.visitedAt)
+    );
+    this.panelTitleEl.textContent =
+      records.length > 1
+        ? "同一地点 · " + records.length + " 条足迹"
+        : records[0].place;
+    this.panelBodyEl.empty();
+    for (const record of records) this.renderRecord(record);
+    this.panelEl.inert = false;
+    this.panelEl.addClass("is-open");
+    this.panelEl.setAttribute("aria-hidden", "false");
+  }
+
+  private closePanel(): void {
+    this.selectedGroup = null;
+    if (this.panelEl?.contains(document.activeElement)) this.mapEl?.focus();
+    this.panelEl?.removeClass("is-open");
+    this.panelEl?.setAttribute("aria-hidden", "true");
+    if (this.panelEl) this.panelEl.inert = true;
+  }
+
+  private renderRecord(record: FootprintOverviewRecord): void {
+    const article = this.panelBodyEl.createEl("article", {
+      cls: "footprint-overview-record",
+    });
+    const header = article.createDiv({
+      cls: "footprint-overview-record-header",
+    });
+    const copy = header.createDiv({
+      cls: "footprint-overview-record-copy",
+    });
+    const title = copy.createEl("h4", { text: record.place });
+    if (record.draft) {
+      title.createSpan({
+        cls: "footprint-overview-draft-badge",
+        text: "草稿",
+      });
+    }
+    copy.createEl("p", {
+      text: [overviewDateLabel(record.visitedAt), record.city, record.region]
+        .filter(Boolean)
+        .join(" · "),
+    });
+    const editButton = makeButton(header, "编辑", "square-pen");
+    editButton.addEventListener(
+      "click",
+      () => void this.plugin.openStudio(record.file)
+    );
+
+    if (record.relatedPosts.length) {
+      const related = article.createDiv({
+        cls: "footprint-overview-related-posts",
+      });
+      const relatedLabel = related.createDiv({
+        cls: "footprint-overview-related-label",
+      });
+      setIcon(relatedLabel, "file-text");
+      relatedLabel.createSpan({
+        text: record.relatedPosts.length + " 篇关联文章",
+      });
+      const relatedList = related.createDiv({
+        cls: "footprint-overview-related-list",
+      });
+      for (const post of record.relatedPosts) {
+        const button = relatedList.createEl("button", {
+          attr: {
+            type: "button",
+            title: post.file ? `打开文章：${post.title}` : post.title,
+          },
+        });
+        button.createSpan({ text: post.title });
+        const arrow = button.createSpan({
+          cls: "footprint-overview-related-arrow",
+        });
+        setIcon(arrow, "arrow-up-right");
+        button.disabled = !post.file;
+        if (post.file) {
+          button.addEventListener("mousedown", event => event.preventDefault());
+          button.addEventListener("click", () => void this.openRelatedPost(post));
+        }
+      }
+    }
+
+    if (record.photos.length) {
+      const photos = article.createDiv({
+        cls:
+          "footprint-overview-photos" +
+          (record.photos.length === 4 ? " is-four" : ""),
+      });
+      for (const photo of record.photos) {
+        const button = photos.createEl("button", {
+          cls:
+            "footprint-overview-photo" + (photo.hidden ? " is-hidden" : ""),
+          attr: {
+            type: "button",
+            title: photo.hidden
+              ? "网站隐藏照片，点击预览"
+              : "点击预览照片",
+          },
+        });
+        button.createEl("img", {
+          attr: {
+            src: photo.previewUrl,
+            alt: photo.alt || record.place,
+            loading: "lazy",
+          },
+        });
+        if (photo.hidden) {
+          const badge = button.createSpan({
+            cls: "footprint-overview-photo-hidden",
+          });
+          setIcon(badge, "eye-off");
+        }
+        button.addEventListener("click", () => {
+          new PhotoPreviewModal(
+            this.app,
+            photo.previewUrl,
+            photo.alt || record.place,
+            photo.caption
+          ).open();
+        });
+      }
+    }
+
+    if (record.note) {
+      article.createEl("p", {
+        cls: "footprint-overview-note",
+        text: record.note,
+      });
+    }
+  }
+
+  private async openRelatedPost(post: FootprintOverviewPost): Promise<void> {
+    if (!post.file) return;
+    const existingLeaf = this.app.workspace
+      .getLeavesOfType("markdown")
+      .find(
+        leaf =>
+          (leaf.view as unknown as { file?: TFile | null }).file?.path ===
+          post.file?.path
+    );
+    if (existingLeaf) {
+      await this.app.workspace.revealLeaf(existingLeaf);
+      this.app.workspace.setActiveLeaf(existingLeaf, { focus: true });
+      return;
+    }
+    const leaf = this.app.workspace.getLeaf("tab");
+    await leaf.openFile(post.file, { active: true });
+    await this.app.workspace.revealLeaf(leaf);
+    this.app.workspace.setActiveLeaf(leaf, { focus: true });
+  }
+
+  private coverOf(records: FootprintOverviewRecord[]): string {
+    for (const record of records) {
+      const photo = record.photos.find(item => item.previewUrl);
+      if (photo) return photo.previewUrl;
+    }
+    return "";
+  }
+
+  private async loadOverviewPosts(): Promise<
+    Map<string, FootprintOverviewPost>
+  > {
+    const prefix = normalizePath(this.plugin.settings.blogFolder) + "/";
+    const files = this.app.vault.getFiles().filter(file => {
+      const extension = file.extension.toLowerCase();
+      return (
+        file.path.startsWith(prefix) &&
+        (extension === "md" || extension === "mdx")
+      );
+    });
+    const posts = await Promise.all(
+      files.map(async file => {
+        let frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        if (!frontmatter) {
+          const markdown = await this.app.vault.cachedRead(file);
+          const match = markdown.match(
+            /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
+          );
+          if (match) {
+            frontmatter = parseYaml(match[1]) as Record<string, unknown>;
+          }
+        }
+        const id = String(frontmatter?.slug ?? "").trim() || file.basename;
+        const title =
+          String(frontmatter?.title ?? "").trim() || file.basename;
+        return { id, title, file } satisfies FootprintOverviewPost;
+      })
+    );
+    const index = new Map<string, FootprintOverviewPost>();
+    for (const post of posts) {
+      index.set(post.id, post);
+      if (!index.has(post.file!.basename)) {
+        index.set(post.file!.basename, post);
+      }
+    }
+    return index;
+  }
+
+  private async loadRecords(): Promise<FootprintOverviewRecord[]> {
+    const prefix =
+      normalizePath(this.plugin.settings.footprintsFolder) + "/";
+    const relatedPostIndex = await this.loadOverviewPosts();
+    const files = this.app.vault
+      .getMarkdownFiles()
+      .filter(file => file.path.startsWith(prefix));
+    const records = await Promise.all(
+      files.map(async file => {
+        const markdown = await this.app.vault.cachedRead(file);
+        let frontmatter =
+          this.app.metadataCache.getFileCache(file)?.frontmatter;
+        if (!frontmatter) {
+          const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+          if (match) {
+            frontmatter = parseYaml(match[1]) as Record<string, unknown>;
+          }
+        }
+        if (!frontmatter) return null;
+        const coordinates = frontmatter.coordinates as
+          | Record<string, unknown>
+          | undefined;
+        const lat = Number(coordinates?.lat);
+        const lng = Number(coordinates?.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+        const photos = (
+          Array.isArray(frontmatter.photos) ? frontmatter.photos : []
+        )
+          .map((value: unknown): FootprintOverviewPhoto | null => {
+            if (!value || typeof value !== "object") return null;
+            const photo = value as Record<string, unknown>;
+            const source = String(photo.src ?? "");
+            if (!source) return null;
+            const linked = this.app.metadataCache.getFirstLinkpathDest(
+              source,
+              file.path
+            );
+            return {
+              source,
+              previewUrl:
+                linked instanceof TFile
+                  ? this.app.vault.getResourcePath(linked)
+                  : "",
+              alt: String(photo.alt ?? ""),
+              caption: String(photo.caption ?? ""),
+              hidden: Boolean(photo.hidden),
+            };
+          })
+          .filter(
+            (photo): photo is FootprintOverviewPhoto =>
+              Boolean(photo?.previewUrl)
+          );
+        const relatedPostIds = (
+          Array.isArray(frontmatter.relatedPosts)
+            ? frontmatter.relatedPosts
+            : []
+        )
+          .map((value: unknown) => String(value).trim())
+          .filter(Boolean);
+        const relatedPosts = relatedPostIds.map(
+          id => relatedPostIndex.get(id) ?? { id, title: id, file: null }
+        );
+
+        return {
+          file,
+          visitedAt: dateString(frontmatter.visitedAt),
+          country: String(frontmatter.country ?? ""),
+          region: String(frontmatter.region ?? ""),
+          city: String(frontmatter.city ?? ""),
+          place: String(frontmatter.place ?? file.basename),
+          lat,
+          lng,
+          draft: Boolean(frontmatter.draft),
+          photos,
+          relatedPosts,
+          note: stripFrontmatter(markdown).trim(),
+        } satisfies FootprintOverviewRecord;
+      })
+    );
+    return records
+      .filter(
+        (record): record is FootprintOverviewRecord => Boolean(record)
+      )
+      .sort((a, b) => b.visitedAt.localeCompare(a.visitedAt));
+  }
+
+  private isFootprintFile(file: TFile): boolean {
+    const prefix =
+      normalizePath(this.plugin.settings.footprintsFolder) + "/";
+    return (
+      file.extension.toLowerCase() === "md" &&
+      file.path.startsWith(prefix)
+    );
+  }
+
+  private scheduleRefresh(): void {
+    if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+    this.refreshTimer = window.setTimeout(() => {
+      this.refreshTimer = 0;
+      void this.refresh();
+    }, 180);
   }
 }
 
@@ -1937,6 +2725,15 @@ class FootprintStudioView extends ItemView {
       editor.hidden = true;
       const alt = this.createCompactInput(editor, "替代文本", photo.alt);
       const caption = this.createCompactInput(editor, "图片说明（可选）", photo.caption);
+      const setCopyEditorOpen = (open: boolean, focusInput = false) => {
+        editor.hidden = !open;
+        copyPreview.setAttribute("aria-expanded", String(open));
+        // A draggable ancestor takes over pointer movement before the browser can
+        // create a text selection. Suspend card sorting for the whole editing
+        // session, then restore it when the popover closes.
+        card.draggable = !open;
+        if (open && focusInput) alt.focus();
+      };
       const refreshCopy = () => {
         altText.textContent = photo.alt.trim() || "添加替代文本";
         captionText.textContent = photo.caption.trim();
@@ -1967,22 +2764,22 @@ class FootprintStudioView extends ItemView {
       });
       refreshCopy();
       copyPreview.addEventListener("click", () => {
-        editor.hidden = !editor.hidden;
-        copyPreview.setAttribute("aria-expanded", String(!editor.hidden));
-        if (!editor.hidden) alt.focus();
+        setCopyEditorOpen(editor.hidden, true);
       });
       copy.addEventListener("pointerdown", event => event.stopPropagation());
+      editor.addEventListener("dragstart", event => {
+        event.preventDefault();
+        event.stopPropagation();
+      });
       copy.addEventListener("keydown", event => {
         if (event.key !== "Escape") return;
-        editor.hidden = true;
-        copyPreview.setAttribute("aria-expanded", "false");
+        setCopyEditorOpen(false);
         copyPreview.focus();
       });
       copy.addEventListener("focusout", () => {
         window.setTimeout(() => {
           if (!copy.contains(document.activeElement)) {
-            editor.hidden = true;
-            copyPreview.setAttribute("aria-expanded", "false");
+            setCopyEditorOpen(false);
           }
         }, 0);
       });
@@ -1993,6 +2790,10 @@ class FootprintStudioView extends ItemView {
     const input = parent.createEl("input", { type: "text", placeholder });
     input.value = value;
     input.addEventListener("pointerdown", event => event.stopPropagation());
+    input.addEventListener("dragstart", event => {
+      event.preventDefault();
+      event.stopPropagation();
+    });
     return input;
   }
 
