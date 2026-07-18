@@ -1,5 +1,7 @@
 import {
+  App,
   ItemView,
+  Modal,
   Notice,
   Plugin,
   PluginSettingTab,
@@ -8,6 +10,7 @@ import {
   TFolder,
   WorkspaceLeaf,
   normalizePath,
+  parseYaml,
   requestUrl,
   setIcon,
 } from "obsidian";
@@ -15,6 +18,9 @@ import * as L from "leaflet";
 import { pinyin } from "pinyin-pro";
 
 const VIEW_TYPE = "footprint-studio-view";
+const MAP_HEIGHT_MIN = 300;
+const MAP_HEIGHT_MAX = 680;
+const MAP_HEIGHT_DEFAULT = 380;
 
 interface FootprintStudioSettings {
   footprintsFolder: string;
@@ -24,6 +30,7 @@ interface FootprintStudioSettings {
   defaultLat: number;
   defaultLng: number;
   defaultZoom: number;
+  mapHeight: number;
 }
 
 const DEFAULT_SETTINGS: FootprintStudioSettings = {
@@ -34,7 +41,381 @@ const DEFAULT_SETTINGS: FootprintStudioSettings = {
   defaultLat: 35.8617,
   defaultLng: 104.1954,
   defaultZoom: 4,
+  mapHeight: MAP_HEIGHT_DEFAULT,
 };
+
+function normalizeMapHeight(value: unknown): number {
+  const height = Number(value);
+  if (!Number.isFinite(height)) return MAP_HEIGHT_DEFAULT;
+  return Math.min(MAP_HEIGHT_MAX, Math.max(MAP_HEIGHT_MIN, Math.round(height)));
+}
+
+function normalizeSearchText(value: string): string {
+  return value.toLocaleLowerCase("zh-CN");
+}
+
+function appendHighlightedText(
+  parent: HTMLElement,
+  value: string,
+  normalizedQuery: string
+): void {
+  const normalizedValue = normalizeSearchText(value);
+  if (
+    !normalizedQuery ||
+    normalizedValue.length !== value.length ||
+    !normalizedValue.includes(normalizedQuery)
+  ) {
+    parent.append(document.createTextNode(value));
+    return;
+  }
+
+  let offset = 0;
+  while (offset < value.length) {
+    const matchIndex = normalizedValue.indexOf(normalizedQuery, offset);
+    if (matchIndex === -1) {
+      parent.append(document.createTextNode(value.slice(offset)));
+      break;
+    }
+    if (matchIndex > offset) {
+      parent.append(document.createTextNode(value.slice(offset, matchIndex)));
+    }
+    parent.createEl("mark", {
+      cls: "footprint-studio-post-match",
+      text: value.slice(matchIndex, matchIndex + normalizedQuery.length),
+    });
+    offset = matchIndex + normalizedQuery.length;
+  }
+}
+
+interface PhotoGpsCoordinates {
+  lat: number;
+  lng: number;
+}
+
+interface PhotoExifMetadata {
+  coordinates: PhotoGpsCoordinates | null;
+  capturedAt: string | null;
+}
+
+function parseTiffGps(
+  view: DataView,
+  tiffOffset: number,
+  tiffEnd: number
+): PhotoGpsCoordinates | null {
+  const hasRange = (offset: number, length: number): boolean =>
+    Number.isSafeInteger(offset) &&
+    Number.isSafeInteger(length) &&
+    length >= 0 &&
+    offset >= tiffOffset &&
+    offset <= tiffEnd - length;
+  if (!hasRange(tiffOffset, 8)) return null;
+
+  const byteOrder = view.getUint16(tiffOffset, false);
+  const littleEndian = byteOrder === 0x4949;
+  if (!littleEndian && byteOrder !== 0x4d4d) return null;
+
+  const readUint16 = (offset: number): number | null =>
+    hasRange(offset, 2) ? view.getUint16(offset, littleEndian) : null;
+  const readUint32 = (offset: number): number | null =>
+    hasRange(offset, 4) ? view.getUint32(offset, littleEndian) : null;
+  if (readUint16(tiffOffset + 2) !== 42) return null;
+
+  const findEntry = (ifdRelativeOffset: number, wantedTag: number): number | null => {
+    const ifdOffset = tiffOffset + ifdRelativeOffset;
+    const count = readUint16(ifdOffset);
+    if (count == null || count > 1024 || !hasRange(ifdOffset + 2, count * 12)) {
+      return null;
+    }
+    for (let index = 0; index < count; index += 1) {
+      const entryOffset = ifdOffset + 2 + index * 12;
+      if (readUint16(entryOffset) === wantedTag) return entryOffset;
+    }
+    return null;
+  };
+
+  const ifd0Offset = readUint32(tiffOffset + 4);
+  if (ifd0Offset == null) return null;
+  const gpsPointerEntry = findEntry(ifd0Offset, 0x8825);
+  if (gpsPointerEntry == null) return null;
+  const gpsPointerType = readUint16(gpsPointerEntry + 2);
+  const gpsPointerCount = readUint32(gpsPointerEntry + 4);
+  if ((gpsPointerType !== 4 && gpsPointerType !== 13) || gpsPointerCount !== 1) {
+    return null;
+  }
+  const gpsIfdOffset = readUint32(gpsPointerEntry + 8);
+  if (gpsIfdOffset == null) return null;
+
+  const typeSizes: Record<number, number> = {
+    1: 1,
+    2: 1,
+    3: 2,
+    4: 4,
+    5: 8,
+    9: 4,
+    10: 8,
+    13: 4,
+  };
+  const fieldData = (
+    entryOffset: number
+  ): { offset: number; type: number; count: number } | null => {
+    const type = readUint16(entryOffset + 2);
+    const count = readUint32(entryOffset + 4);
+    if (type == null || count == null || count > 1_000_000) return null;
+    const typeSize = typeSizes[type];
+    if (!typeSize) return null;
+    const byteLength = typeSize * count;
+    if (!Number.isSafeInteger(byteLength)) return null;
+    let offset = entryOffset + 8;
+    if (byteLength > 4) {
+      const relativeOffset = readUint32(entryOffset + 8);
+      if (relativeOffset == null) return null;
+      offset = tiffOffset + relativeOffset;
+    }
+    return hasRange(offset, byteLength) ? { offset, type, count } : null;
+  };
+  const readAscii = (entryOffset: number | null): string | null => {
+    if (entryOffset == null) return null;
+    const field = fieldData(entryOffset);
+    if (!field || field.type !== 2) return null;
+    let value = "";
+    for (let index = 0; index < field.count; index += 1) {
+      const character = view.getUint8(field.offset + index);
+      if (character !== 0) value += String.fromCharCode(character);
+    }
+    return value.trim().toUpperCase();
+  };
+  const readRationals = (entryOffset: number | null): number[] | null => {
+    if (entryOffset == null) return null;
+    const field = fieldData(entryOffset);
+    if (!field || (field.type !== 5 && field.type !== 10) || field.count < 3) {
+      return null;
+    }
+    const values: number[] = [];
+    for (let index = 0; index < 3; index += 1) {
+      const offset = field.offset + index * 8;
+      const numerator =
+        field.type === 10
+          ? view.getInt32(offset, littleEndian)
+          : view.getUint32(offset, littleEndian);
+      const denominator =
+        field.type === 10
+          ? view.getInt32(offset + 4, littleEndian)
+          : view.getUint32(offset + 4, littleEndian);
+      if (denominator === 0) return null;
+      values.push(numerator / denominator);
+    }
+    return values;
+  };
+
+  const latitudeRef = readAscii(findEntry(gpsIfdOffset, 1));
+  const latitudeDms = readRationals(findEntry(gpsIfdOffset, 2));
+  const longitudeRef = readAscii(findEntry(gpsIfdOffset, 3));
+  const longitudeDms = readRationals(findEntry(gpsIfdOffset, 4));
+  if (
+    !latitudeDms ||
+    !longitudeDms ||
+    (latitudeRef !== "N" && latitudeRef !== "S") ||
+    (longitudeRef !== "E" && longitudeRef !== "W")
+  ) {
+    return null;
+  }
+  const validDms = ([degrees, minutes, seconds]: number[]): boolean =>
+    [degrees, minutes, seconds].every(Number.isFinite) &&
+    degrees >= 0 &&
+    minutes >= 0 &&
+    minutes < 60 &&
+    seconds >= 0 &&
+    seconds < 60;
+  if (!validDms(latitudeDms) || !validDms(longitudeDms)) return null;
+
+  let lat = latitudeDms[0] + latitudeDms[1] / 60 + latitudeDms[2] / 3600;
+  let lng = longitudeDms[0] + longitudeDms[1] / 60 + longitudeDms[2] / 3600;
+  if (latitudeRef === "S") lat *= -1;
+  if (longitudeRef === "W") lng *= -1;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return null;
+  }
+  return { lat, lng };
+}
+
+function normalizeExifDateTime(value: string | null): string | null {
+  if (!value) return null;
+  const match = value
+    .replace(/\0/g, "")
+    .trim()
+    .match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    0,
+    31,
+    isLeapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31,
+  ][month];
+  if (
+    year < 1 ||
+    month < 1 ||
+    month > 12 ||
+    day < 1 ||
+    day > daysInMonth ||
+    hour < 0 ||
+    hour > 23 ||
+    minute < 0 ||
+    minute > 59 ||
+    second < 0 ||
+    second > 59
+  ) {
+    return null;
+  }
+  return `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}`;
+}
+
+function parseTiffCapturedAt(
+  view: DataView,
+  tiffOffset: number,
+  tiffEnd: number
+): string | null {
+  const hasRange = (offset: number, length: number): boolean =>
+    Number.isSafeInteger(offset) &&
+    Number.isSafeInteger(length) &&
+    length >= 0 &&
+    offset >= tiffOffset &&
+    offset <= tiffEnd - length;
+  if (!hasRange(tiffOffset, 8)) return null;
+
+  const byteOrder = view.getUint16(tiffOffset, false);
+  const littleEndian = byteOrder === 0x4949;
+  if (!littleEndian && byteOrder !== 0x4d4d) return null;
+  const readUint16 = (offset: number): number | null =>
+    hasRange(offset, 2) ? view.getUint16(offset, littleEndian) : null;
+  const readUint32 = (offset: number): number | null =>
+    hasRange(offset, 4) ? view.getUint32(offset, littleEndian) : null;
+  if (readUint16(tiffOffset + 2) !== 42) return null;
+
+  const findEntry = (ifdRelativeOffset: number, wantedTag: number): number | null => {
+    const ifdOffset = tiffOffset + ifdRelativeOffset;
+    const count = readUint16(ifdOffset);
+    if (count == null || count > 1024 || !hasRange(ifdOffset + 2, count * 12)) {
+      return null;
+    }
+    for (let index = 0; index < count; index += 1) {
+      const entryOffset = ifdOffset + 2 + index * 12;
+      if (readUint16(entryOffset) === wantedTag) return entryOffset;
+    }
+    return null;
+  };
+  const readAscii = (entryOffset: number | null): string | null => {
+    if (entryOffset == null || readUint16(entryOffset + 2) !== 2) return null;
+    const count = readUint32(entryOffset + 4);
+    if (count == null || count < 1 || count > 1024) return null;
+    let offset = entryOffset + 8;
+    if (count > 4) {
+      const relativeOffset = readUint32(entryOffset + 8);
+      if (relativeOffset == null) return null;
+      offset = tiffOffset + relativeOffset;
+    }
+    if (!hasRange(offset, count)) return null;
+    let value = "";
+    for (let index = 0; index < count; index += 1) {
+      value += String.fromCharCode(view.getUint8(offset + index));
+    }
+    return value;
+  };
+
+  const ifd0Offset = readUint32(tiffOffset + 4);
+  if (ifd0Offset == null) return null;
+  let exifIfdOffset: number | null = null;
+  const exifPointer = findEntry(ifd0Offset, 0x8769);
+  if (exifPointer != null) {
+    const type = readUint16(exifPointer + 2);
+    const count = readUint32(exifPointer + 4);
+    if ((type === 4 || type === 13) && count === 1) {
+      exifIfdOffset = readUint32(exifPointer + 8);
+    }
+  }
+
+  const original =
+    exifIfdOffset == null
+      ? null
+      : readAscii(findEntry(exifIfdOffset, 0x9003)) ??
+        readAscii(findEntry(exifIfdOffset, 0x9004));
+  const fallback = readAscii(findEntry(ifd0Offset, 0x0132));
+  return normalizeExifDateTime(original ?? fallback);
+}
+
+function extractPhotoMetadata(buffer: ArrayBuffer): PhotoExifMetadata | null {
+  const view = new DataView(buffer);
+  if (view.byteLength < 8) return null;
+  try {
+    const isTiffHeader = (offset: number): boolean => {
+      if (offset < 0 || offset + 4 > view.byteLength) return false;
+      const order = view.getUint16(offset, false);
+      const littleEndian = order === 0x4949;
+      return (
+        (littleEndian || order === 0x4d4d) &&
+        view.getUint16(offset + 2, littleEndian) === 42
+      );
+    };
+    const readMetadata = (tiffOffset: number, tiffEnd: number): PhotoExifMetadata | null => {
+      const coordinates = parseTiffGps(view, tiffOffset, tiffEnd);
+      const capturedAt = parseTiffCapturedAt(view, tiffOffset, tiffEnd);
+      return coordinates || capturedAt ? { coordinates, capturedAt } : null;
+    };
+    if (isTiffHeader(0)) return readMetadata(0, view.byteLength);
+    if (view.getUint16(0, false) !== 0xffd8) return null;
+
+    let offset = 2;
+    while (offset + 4 <= view.byteLength) {
+      if (view.getUint8(offset) !== 0xff) {
+        offset += 1;
+        continue;
+      }
+      while (offset < view.byteLength && view.getUint8(offset) === 0xff) offset += 1;
+      if (offset >= view.byteLength) break;
+      const marker = view.getUint8(offset);
+      offset += 1;
+      if (marker === 0xd9 || marker === 0xda) break;
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+      if (offset + 2 > view.byteLength) break;
+      const segmentLength = view.getUint16(offset, false);
+      if (segmentLength < 2 || offset + segmentLength > view.byteLength) break;
+      const payloadOffset = offset + 2;
+      const segmentEnd = offset + segmentLength;
+      const hasExifHeader =
+        marker === 0xe1 &&
+        payloadOffset + 6 <= segmentEnd &&
+        view.getUint32(payloadOffset, false) === 0x45786966 &&
+        view.getUint16(payloadOffset + 4, false) === 0;
+      if (hasExifHeader) {
+        const tiffOffset = payloadOffset + 6;
+        if (isTiffHeader(tiffOffset)) {
+          const metadata = readMetadata(tiffOffset, segmentEnd);
+          if (metadata) return metadata;
+        }
+      }
+      offset += segmentLength;
+    }
+  } catch (error) {
+    console.warn("Footprint Studio 无法解析照片 EXIF", error);
+  }
+  return null;
+}
 
 interface PhotoDraft {
   id: string;
@@ -44,12 +425,17 @@ interface PhotoDraft {
   alt: string;
   caption: string;
   position: string;
+  hidden: boolean;
+  coordinates: PhotoGpsCoordinates | null;
+  capturedAt: string;
+  metadataPending: boolean;
 }
 
 interface BlogPostOption {
   id: string;
   title: string;
   path: string;
+  keywords: string[];
 }
 
 interface NominatimAddress {
@@ -90,6 +476,7 @@ interface NominatimResult {
 type FieldName =
   | "fileName"
   | "visitedAt"
+  | "capturedTime"
   | "country"
   | "region"
   | "city"
@@ -115,6 +502,22 @@ function dateString(value: unknown): string {
   const text = String(value ?? "").trim();
   const match = text.match(/^\d{4}-\d{2}-\d{2}/);
   return match?.[0] ?? todayString();
+}
+
+function timeString(value: unknown): string {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return [value.getHours(), value.getMinutes(), value.getSeconds()]
+      .map(part => String(part).padStart(2, "0"))
+      .join(":");
+  }
+  const match = String(value ?? "").match(/[T\s](\d{2}):(\d{2})(?::(\d{2}))?/);
+  return match ? `${match[1]}:${match[2]}:${match[3] ?? "00"}` : "";
+}
+
+function dateTimeString(value: unknown): string {
+  if (value == null || String(value).trim() === "") return "";
+  const time = timeString(value);
+  return time ? `${dateString(value)}T${time}` : "";
 }
 
 function yamlString(value: string): string {
@@ -190,13 +593,69 @@ function makeButton(
   return button;
 }
 
+class PhotoPreviewModal extends Modal {
+  constructor(
+    app: App,
+    private imageUrl: string,
+    private imageAlt: string,
+    private imageCaption: string
+  ) {
+    super(app);
+  }
+
+  onOpen(): void {
+    this.modalEl.addClass("footprint-studio-photo-modal");
+    this.setTitle(this.imageAlt || "照片预览");
+    const image = this.contentEl.createEl("img", {
+      attr: { src: this.imageUrl, alt: this.imageAlt || "照片预览" },
+    });
+    image.draggable = false;
+    if (this.imageCaption) {
+      this.contentEl.createEl("p", {
+        cls: "footprint-studio-photo-modal-caption",
+        text: this.imageCaption,
+      });
+    }
+  }
+
+  onClose(): void {
+    this.contentEl.empty();
+  }
+}
+
 export default class FootprintStudioPlugin extends Plugin {
   settings: FootprintStudioSettings = DEFAULT_SETTINGS;
+  private autoOpenRequest = 0;
+  private knownLeaves = new WeakSet<WorkspaceLeaf>();
+  private transientLeaves = new WeakSet<WorkspaceLeaf>();
+  private nativeMarkdownLeaves = new WeakMap<WorkspaceLeaf, string>();
 
   async onload(): Promise<void> {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.mapHeight = normalizeMapHeight(this.settings.mapHeight);
 
     this.registerView(VIEW_TYPE, leaf => new FootprintStudioView(leaf, this));
+    this.app.workspace.onLayoutReady(() => {
+      this.app.workspace.iterateAllLeaves(leaf => this.knownLeaves.add(leaf));
+      this.registerEvent(
+        this.app.workspace.on("file-open", file => {
+          if (!this.isFootprintFile(file)) return;
+          this.scheduleAutoOpen(file);
+        })
+      );
+      this.registerEvent(
+        this.app.workspace.on("active-leaf-change", leaf => {
+          if (leaf && !this.knownLeaves.has(leaf)) this.transientLeaves.add(leaf);
+          if (leaf) this.knownLeaves.add(leaf);
+          const file = this.getLeafFile(leaf);
+          const nativePath = leaf ? this.nativeMarkdownLeaves.get(leaf) : undefined;
+          if (leaf && nativePath && nativePath !== file?.path) {
+            this.nativeMarkdownLeaves.delete(leaf);
+          }
+          if (this.isFootprintFile(file)) this.scheduleAutoOpen(file, leaf);
+        })
+      );
+    });
     this.addRibbonIcon("map-pinned", "新建足迹", () => void this.openStudio());
     this.addRibbonIcon("square-pen", "编辑当前足迹", () => {
       const activeFile = this.app.workspace.getActiveFile();
@@ -234,6 +693,12 @@ export default class FootprintStudioPlugin extends Plugin {
             .setIcon("map-pinned")
             .onClick(() => this.openStudio(file))
         );
+        menu.addItem(item =>
+          item
+            .setTitle("使用原生 Markdown 打开")
+            .setIcon("file-text")
+            .onClick(() => void this.openNativeMarkdown(file))
+        );
       })
     );
 
@@ -250,31 +715,123 @@ export default class FootprintStudioPlugin extends Plugin {
     await this.saveData(this.settings);
   }
 
-  private isFootprintFile(file: unknown): file is TFile {
-    const prefix = `${normalizePath(this.settings.footprintsFolder)}/`;
-    return file instanceof TFile && file.path.startsWith(prefix);
+  refreshMapHeights(): void {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view instanceof FootprintStudioView) {
+        leaf.view.setMapHeight(this.settings.mapHeight);
+      }
+    }
   }
 
-  async openStudio(file?: TFile): Promise<void> {
+  private isFootprintFile(file: unknown): file is TFile {
+    const prefix = `${normalizePath(this.settings.footprintsFolder)}/`;
+    return (
+      file instanceof TFile &&
+      file.extension.toLowerCase() === "md" &&
+      file.path.startsWith(prefix)
+    );
+  }
+
+  private getLeafFile(leaf: WorkspaceLeaf | null | undefined): TFile | null {
+    const file = (leaf?.view as { file?: TFile | null } | undefined)?.file;
+    return file instanceof TFile ? file : null;
+  }
+
+  private scheduleAutoOpen(file: TFile, preferredLeaf?: WorkspaceLeaf | null): void {
+    const request = ++this.autoOpenRequest;
+    window.setTimeout(() => {
+      if (request !== this.autoOpenRequest) return;
+      const leaf = this.resolveOpenedLeaf(file, preferredLeaf);
+      if (leaf && this.nativeMarkdownLeaves.get(leaf) === file.path) return;
+      const existingLeaf = this.findStudioLeaf(file);
+      if (existingLeaf) {
+        this.app.workspace.revealLeaf(existingLeaf);
+        if (leaf && leaf !== existingLeaf && this.transientLeaves.has(leaf)) {
+          this.transientLeaves.delete(leaf);
+          leaf.detach();
+        }
+        return;
+      }
+      if (!leaf || leaf.view instanceof FootprintStudioView) return;
+      this.transientLeaves.delete(leaf);
+      void this.openStudio(file, leaf);
+    }, 0);
+  }
+
+  private findStudioLeaf(file: TFile): WorkspaceLeaf | null {
+    const leaves = this.app.workspace
+      .getLeavesOfType(VIEW_TYPE)
+      .filter(
+        leaf =>
+          leaf.view instanceof FootprintStudioView &&
+          leaf.view.getEditingPath() === file.path
+      );
+    const recentLeaf = this.app.workspace.getMostRecentLeaf();
+    return leaves.find(leaf => leaf === recentLeaf) ?? leaves[0] ?? null;
+  }
+
+  private async openNativeMarkdown(file: TFile): Promise<void> {
+    const existingLeaf = this.app.workspace
+      .getLeavesOfType("markdown")
+      .find(leaf => this.getLeafFile(leaf)?.path === file.path);
+    const leaf = existingLeaf ?? this.app.workspace.getLeaf("tab");
+    this.nativeMarkdownLeaves.set(leaf, file.path);
+    try {
+      if (!existingLeaf) await leaf.openFile(file);
+      this.app.workspace.revealLeaf(leaf);
+    } catch (error) {
+      this.nativeMarkdownLeaves.delete(leaf);
+      console.error("Footprint Studio 原生打开失败", error);
+      new Notice("无法使用原生 Markdown 打开这篇足迹");
+    }
+  }
+
+  private resolveOpenedLeaf(
+    file: TFile,
+    preferredLeaf?: WorkspaceLeaf | null
+  ): WorkspaceLeaf | null {
+    const matches = (leaf: WorkspaceLeaf | null | undefined): leaf is WorkspaceLeaf =>
+      Boolean(
+        leaf &&
+          leaf.view.getViewType() === "markdown" &&
+          this.getLeafFile(leaf)?.path === file.path
+      );
+
+    if (matches(preferredLeaf)) return preferredLeaf;
+
+    const recentLeaf = this.app.workspace.getMostRecentLeaf();
+    if (matches(recentLeaf)) return recentLeaf;
+
+    const candidates: WorkspaceLeaf[] = [];
+    this.app.workspace.iterateAllLeaves(leaf => {
+      if (matches(leaf)) candidates.push(leaf);
+    });
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+
+  async openStudio(file?: TFile, targetLeaf?: WorkspaceLeaf): Promise<void> {
     if (file) {
-      const existingLeaf = this.app.workspace
-        .getLeavesOfType(VIEW_TYPE)
-        .find(
-          leaf =>
-            leaf.view instanceof FootprintStudioView &&
-            leaf.view.getEditingPath() === file.path
-        );
+      const existingLeaf = this.findStudioLeaf(file);
       if (existingLeaf) {
         this.app.workspace.revealLeaf(existingLeaf);
         return;
       }
     }
 
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    const leaf = targetLeaf ?? this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({
+      type: VIEW_TYPE,
+      state: { filePath: file?.path ?? null },
+      active: true,
+    });
     this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
-    if (view instanceof FootprintStudioView) await view.openFile(file ?? null);
+    if (
+      view instanceof FootprintStudioView &&
+      view.getEditingPath() !== (file?.path ?? null)
+    ) {
+      await view.openFile(file ?? null);
+    }
   }
 }
 
@@ -282,10 +839,13 @@ class FootprintStudioView extends ItemView {
   private plugin: FootprintStudioPlugin;
   private map: L.Map | null = null;
   private marker: L.Marker | null = null;
+  private savedCoordinates: PhotoGpsCoordinates | null = null;
+  private resetMapButton: HTMLAnchorElement | null = null;
   private currentFile: TFile | null = null;
   private photos: PhotoDraft[] = [];
   private blogPosts: BlogPostOption[] = [];
   private selectedPosts = new Set<string>();
+  private readonly instanceId = Math.random().toString(36).slice(2);
   private fields = {} as Record<FieldName, HTMLInputElement | HTMLTextAreaElement>;
   private draftInput!: HTMLInputElement;
   private photosEl!: HTMLElement;
@@ -319,6 +879,29 @@ class FootprintStudioView extends ItemView {
     return this.currentFile?.path ?? null;
   }
 
+  getState(): Record<string, unknown> {
+    return { filePath: this.currentFile?.path ?? null };
+  }
+
+  async setState(state: unknown): Promise<void> {
+    const filePath =
+      state && typeof state === "object" && "filePath" in state
+        ? String((state as { filePath?: unknown }).filePath ?? "")
+        : "";
+    if (!filePath) {
+      if (this.currentFile) await this.openFile(null);
+      return;
+    }
+    if (this.currentFile?.path === filePath) return;
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (file instanceof TFile) {
+      await this.openFile(file);
+      return;
+    }
+    this.resetForm();
+    new Notice(`原足迹文件不存在：${filePath}`);
+  }
+
   async onOpen(): Promise<void> {
     await this.renderView();
   }
@@ -327,6 +910,7 @@ class FootprintStudioView extends ItemView {
     this.disposePhotos();
     this.map?.remove();
     this.map = null;
+    this.resetMapButton = null;
   }
 
   async openFile(file: TFile | null): Promise<void> {
@@ -347,6 +931,7 @@ class FootprintStudioView extends ItemView {
     this.fields.fileName.disabled = false;
     this.fileNameButton.disabled = false;
     this.fields.visitedAt.value = dateString(frontmatter.visitedAt);
+    this.fields.capturedTime.value = timeString(frontmatter.capturedAt);
     this.fields.country.value = String(frontmatter.country ?? "");
     this.fields.region.value = String(frontmatter.region ?? "");
     this.fields.city.value = String(frontmatter.city ?? "");
@@ -356,6 +941,13 @@ class FootprintStudioView extends ItemView {
     this.fields.place.value = String(frontmatter.place ?? "");
     this.fields.lat.value = String(frontmatter.coordinates?.lat ?? "");
     this.fields.lng.value = String(frontmatter.coordinates?.lng ?? "");
+    const savedLat = Number(frontmatter.coordinates?.lat);
+    const savedLng = Number(frontmatter.coordinates?.lng);
+    this.savedCoordinates =
+      Number.isFinite(savedLat) && Number.isFinite(savedLng)
+        ? { lat: savedLat, lng: savedLng }
+        : null;
+    this.updateResetMapButton();
     this.draftInput.checked = Boolean(frontmatter.draft);
     this.selectedPosts = new Set(
       Array.isArray(frontmatter.relatedPosts)
@@ -377,7 +969,20 @@ class FootprintStudioView extends ItemView {
             linked instanceof TFile ? this.app.vault.getResourcePath(linked) : "",
           alt: String(photo.alt ?? ""),
           caption: String(photo.caption ?? ""),
-          position: String(photo.position ?? ""),
+          position: String(photo.position ?? "center") || "center",
+          hidden: Boolean(photo.hidden),
+          coordinates: (() => {
+            const coordinates = photo.coordinates as
+              | Record<string, unknown>
+              | undefined;
+            const lat = Number(coordinates?.lat);
+            const lng = Number(coordinates?.lng);
+            return Number.isFinite(lat) && Number.isFinite(lng)
+              ? { lat, lng }
+              : null;
+          })(),
+          capturedAt: dateTimeString(photo.capturedAt),
+          metadataPending: false,
         };
       }
     );
@@ -387,6 +992,7 @@ class FootprintStudioView extends ItemView {
     this.renderPostSuggestions();
     this.updateMarker(true);
     this.app.workspace.trigger("layout-change");
+    this.app.workspace.requestSaveLayout();
   }
 
   private async renderView(): Promise<void> {
@@ -404,34 +1010,92 @@ class FootprintStudioView extends ItemView {
     saveButton.addEventListener("click", () => void this.saveFootprint(saveButton));
 
     const workspace = this.contentEl.createDiv({ cls: "footprint-studio-workspace" });
+    const photoPanel = workspace.createDiv({
+      cls: "footprint-studio-form footprint-studio-photo-panel",
+    });
+    this.renderPhotoSection(photoPanel);
+
     const mapPanel = workspace.createDiv({ cls: "footprint-studio-map-panel" });
-    this.renderMapToolbar(mapPanel);
-    const mapEl = mapPanel.createDiv({ cls: "footprint-studio-map" });
+    mapPanel.style.setProperty(
+      "--footprint-studio-map-height",
+      `${this.plugin.settings.mapHeight}px`
+    );
+    const mapHost = mapPanel.createDiv({ cls: "footprint-studio-map-host" });
+    this.renderMapToolbar(mapHost);
+    const mapEl = mapHost.createDiv({ cls: "footprint-studio-map" });
     mapEl.setAttribute("aria-label", "足迹坐标选择地图");
-    this.searchResultsEl = mapPanel.createDiv({
+    this.searchResultsEl = mapHost.createDiv({
       cls: "footprint-studio-search-results",
     });
     this.searchResultsEl.hidden = true;
-
-    const form = workspace.createDiv({ cls: "footprint-studio-form" });
+    const mapFields = mapPanel.createDiv({ cls: "footprint-studio-map-fields" });
+    this.renderMapFields(mapFields);
+    for (const eventName of ["pointerdown", "click", "dblclick"]) {
+      mapFields.addEventListener(eventName, event => event.stopPropagation());
+    }
+    mapFields.addEventListener(
+      "wheel",
+      event => event.stopPropagation(),
+      { passive: true }
+    );
+    const form = workspace.createDiv({
+      cls: "footprint-studio-form footprint-studio-details-form",
+    });
     this.renderBasicFields(form);
     this.renderRelatedSection(form);
-    this.renderPhotoSection(form);
     this.renderDescriptionSection(form);
 
-    this.blogPosts = this.loadBlogPosts();
+    this.blogPosts = await this.loadBlogPosts();
     this.resetForm();
 
     requestAnimationFrame(() => {
       this.map?.remove();
+      this.resetMapButton = null;
       this.map = L.map(mapEl, {
-        zoomControl: true,
+        zoomControl: false,
         scrollWheelZoom: true,
         attributionControl: true,
       }).setView(
         [this.plugin.settings.defaultLat, this.plugin.settings.defaultLng],
         this.plugin.settings.defaultZoom
       );
+      const zoomControl = L.control
+        .zoom({ position: "bottomleft" })
+        .addTo(this.map)
+        .getContainer();
+      if (zoomControl) {
+        const addMapAction = (
+          className: string,
+          label: string,
+          icon: string,
+          action: () => void
+        ) => {
+          const button = zoomControl.createEl("a", {
+            cls: className,
+            attr: { href: "#", role: "button", "aria-label": label, title: label },
+          });
+          setIcon(button, icon);
+          button.addEventListener("click", event => {
+            event.preventDefault();
+            event.stopPropagation();
+            action();
+          });
+          return button;
+        };
+        addMapAction(
+          "footprint-studio-map-center-control",
+          "回到当前标记",
+          "locate-fixed",
+          () => this.centerCurrentMarker()
+        );
+        this.resetMapButton = addMapAction(
+          "footprint-studio-map-reset-control",
+          "恢复已保存坐标",
+          "rotate-ccw",
+          () => this.resetSavedMarker()
+        );
+        this.updateResetMapButton();
+      }
       L.tileLayer(this.plugin.settings.tileUrl, {
         maxZoom: 19,
         attribution: "© OpenStreetMap contributors",
@@ -445,15 +1109,30 @@ class FootprintStudioView extends ItemView {
 
   private renderMapToolbar(parent: HTMLElement): void {
     const toolbar = parent.createDiv({ cls: "footprint-studio-map-toolbar" });
-    const searchInput = toolbar.createEl("input", {
+    const searchControl = toolbar.createDiv({
+      cls: "footprint-studio-map-search-control",
+    });
+    const searchInput = searchControl.createEl("input", {
       type: "search",
       placeholder: "搜索城市或景点",
       attr: { "aria-label": "搜索地图地点" },
     });
-    const searchButton = makeButton(toolbar, "搜索", "search");
-    const locateButton = makeButton(toolbar, "当前位置", "locate-fixed");
-    const reverseButton = makeButton(toolbar, "补全地点", "map-pin-check");
-
+    const searchButton = makeButton(
+      searchControl,
+      "",
+      "search",
+      "footprint-studio-map-search-button"
+    );
+    searchButton.setAttribute("aria-label", "搜索地图地点");
+    searchButton.setAttribute("title", "搜索");
+    const reverseButton = makeButton(
+      toolbar,
+      "补全地点",
+      "map-pin-check",
+      "footprint-studio-map-geocode-button"
+    );
+    reverseButton.setAttribute("title", "根据当前坐标补全地点");
+    reverseButton.addEventListener("click", () => void this.reverseGeocode());
     const runSearch = () => void this.searchPlace(searchInput.value);
     searchButton.addEventListener("click", runSearch);
     searchInput.addEventListener("keydown", event => {
@@ -462,13 +1141,21 @@ class FootprintStudioView extends ItemView {
         runSearch();
       }
     });
-    locateButton.addEventListener("click", () => this.locateUser());
-    reverseButton.addEventListener("click", () => void this.reverseGeocode());
+  }
+
+  setMapHeight(height: number): void {
+    const mapPanel = this.contentEl.querySelector<HTMLElement>(
+      ".footprint-studio-map-panel"
+    );
+    mapPanel?.style.setProperty(
+      "--footprint-studio-map-height",
+      `${normalizeMapHeight(height)}px`
+    );
+    requestAnimationFrame(() => this.map?.invalidateSize({ pan: false }));
   }
 
   private renderBasicFields(parent: HTMLElement): void {
-    const section = this.createSection(parent, "基础信息", "map-pin");
-    const grid = section.createDiv({ cls: "footprint-studio-field-grid" });
+    const grid = parent.createDiv({ cls: "footprint-studio-field-grid" });
     this.fields.fileName = this.createInput(grid, "文件名", "fileName", "例如 2026-07-17-panmen");
     const fileNameControl = document.createElement("div");
     fileNameControl.className = "footprint-studio-file-name-control";
@@ -481,37 +1168,70 @@ class FootprintStudioView extends ItemView {
       "footprint-studio-generate-name"
     );
     this.fileNameButton.addEventListener("click", () => this.generateFileName());
-    this.fields.visitedAt = this.createInput(grid, "日期", "visitedAt", "", "date");
-    this.fields.lat = this.createInput(grid, "纬度", "lat", "31.2883", "number");
-    this.fields.lng = this.createInput(grid, "经度", "lng", "120.6183", "number");
-    this.fields.country = this.createInput(grid, "国家", "country", "中国");
-    this.fields.region = this.createInput(grid, "省 / 地区", "region", "江苏");
-    this.fields.city = this.createInput(grid, "城市", "city", "苏州");
-    this.fields.district = this.createInput(grid, "区 / 县", "district", "姑苏区");
-    this.fields.town = this.createInput(grid, "乡镇 / 街道", "town", "沧浪街道");
-    this.fields.street = this.createInput(grid, "道路 / 门牌", "street", "东大街 49 号");
-    this.fields.place = this.createInput(grid, "具体地点", "place", "盘门");
-    this.fields.lat.setAttribute("step", "any");
-    this.fields.lng.setAttribute("step", "any");
-
-    for (const name of ["lat", "lng"] as FieldName[]) {
-      this.fields[name].addEventListener("change", () => this.updateMarker(false));
-    }
-
-    const draftLabel = section.createEl("label", { cls: "footprint-studio-toggle" });
+    const draftLabel = parent.createEl("label", { cls: "footprint-studio-toggle" });
     this.draftInput = draftLabel.createEl("input", { type: "checkbox" });
     draftLabel.createSpan({ text: "保存为草稿（网站不会展示）" });
   }
 
+  private renderMapFields(parent: HTMLElement): void {
+    this.fields.visitedAt = this.createInput(
+      parent,
+      "拍摄日期",
+      "visitedAt",
+      "",
+      "date"
+    );
+    this.fields.capturedTime = this.createInput(
+      parent,
+      "拍摄时间",
+      "capturedTime",
+      "",
+      "time"
+    );
+    this.fields.capturedTime.setAttribute("step", "1");
+    this.fields.lat = this.createInput(
+      parent,
+      "纬度",
+      "lat",
+      "31.2883",
+      "number"
+    );
+    this.fields.lng = this.createInput(
+      parent,
+      "经度",
+      "lng",
+      "120.6183",
+      "number"
+    );
+    this.fields.country = this.createInput(parent, "国家", "country", "中国");
+    this.fields.region = this.createInput(parent, "省 / 地区", "region", "江苏");
+    this.fields.city = this.createInput(parent, "城市", "city", "苏州");
+    this.fields.district = this.createInput(parent, "区 / 县", "district", "姑苏区");
+    this.fields.town = this.createInput(parent, "乡镇 / 街道", "town", "沧浪街道");
+    this.fields.street = this.createInput(parent, "道路 / 门牌", "street", "东大街 49 号");
+    this.fields.place = this.createInput(parent, "具体地点", "place", "盘门");
+    this.fields.lat.setAttribute("step", "any");
+    this.fields.lng.setAttribute("step", "any");
+    for (const name of ["lat", "lng"] as FieldName[]) {
+      this.fields[name].addEventListener("change", () => this.updateMarker(false));
+    }
+  }
+
   private renderRelatedSection(parent: HTMLElement): void {
-    const section = this.createSection(parent, "关联文章", "link-2");
-    const control = section.createDiv({ cls: "footprint-studio-related-control" });
+    const inputId = `footprint-studio-post-search-${this.instanceId}`;
+    const field = parent.createDiv({ cls: "footprint-studio-details-field" });
+    field.createEl("label", {
+      cls: "footprint-studio-details-label",
+      text: "关联文章",
+      attr: { for: inputId },
+    });
+    const control = field.createDiv({ cls: "footprint-studio-related-control" });
     this.selectedPostsEl = control.createDiv({ cls: "footprint-studio-selected-posts" });
     this.postSearchInput = control.createEl("input", {
       type: "search",
-      placeholder: "输入标题或 slug 搜索并添加文章",
+      placeholder: "输入标题、slug 或关键词搜索文章",
       cls: "footprint-studio-post-search",
-      attr: { autocomplete: "off" },
+      attr: { id: inputId, autocomplete: "off" },
     });
     this.postsEl = control.createDiv({ cls: "footprint-studio-post-list" });
     this.postsEl.hidden = true;
@@ -577,11 +1297,17 @@ class FootprintStudioView extends ItemView {
   }
 
   private renderDescriptionSection(parent: HTMLElement): void {
-    const section = this.createSection(parent, "文字记录", "text-cursor-input");
-    this.fields.description = section.createEl("textarea", {
+    const inputId = `footprint-studio-description-${this.instanceId}`;
+    const field = parent.createDiv({ cls: "footprint-studio-details-field" });
+    field.createEl("label", {
+      cls: "footprint-studio-details-label",
+      text: "文字记录",
+      attr: { for: inputId },
+    });
+    this.fields.description = field.createEl("textarea", {
       cls: "footprint-studio-description",
       placeholder: "写下当时看到的光、天气或心情……",
-      attr: { rows: "7" },
+      attr: { id: inputId, rows: "7" },
     });
   }
 
@@ -614,6 +1340,8 @@ class FootprintStudioView extends ItemView {
 
   private resetForm(): void {
     this.currentFile = null;
+    this.savedCoordinates = null;
+    this.updateResetMapButton();
     this.refreshTitle();
     this.disposePhotos();
     this.photos = [];
@@ -694,7 +1422,7 @@ class FootprintStudioView extends ItemView {
     this.searchResultsEl.createDiv({ cls: "footprint-studio-searching", text: "正在搜索…" });
     try {
       const response = await requestUrl({
-        url: `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&q=${encodeURIComponent(text)}`,
+        url: `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=${encodeURIComponent(text)}`,
         headers: { "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6" },
       });
       const results = response.json as NominatimResult[];
@@ -725,21 +1453,6 @@ class FootprintStudioView extends ItemView {
     }
   }
 
-  private locateUser(): void {
-    if (!navigator.geolocation) {
-      new Notice("当前设备不支持定位");
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      position => {
-        this.setCoordinates(position.coords.latitude, position.coords.longitude, true);
-        void this.reverseGeocode();
-      },
-      () => new Notice("无法获取当前位置，请检查系统定位权限"),
-      { enableHighAccuracy: true, timeout: 10_000 }
-    );
-  }
-
   private async reverseGeocode(): Promise<void> {
     const lat = Number(this.fields.lat.value);
     const lng = Number(this.fields.lng.value);
@@ -759,6 +1472,38 @@ class FootprintStudioView extends ItemView {
       console.error("Footprint Studio reverse geocoding failed", error);
       new Notice("地点反查失败，请手动填写或稍后重试");
     }
+  }
+
+  private centerCurrentMarker(): void {
+    const lat = Number(this.fields.lat.value);
+    const lng = Number(this.fields.lng.value);
+    if (!this.map || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+      new Notice("请先在地图上选择坐标");
+      return;
+    }
+    this.map.setView([lat, lng], Math.max(this.map.getZoom(), 15), {
+      animate: true,
+    });
+  }
+
+  private resetSavedMarker(): void {
+    if (!this.savedCoordinates) {
+      new Notice("当前足迹还没有已保存的坐标");
+      return;
+    }
+    this.setCoordinates(
+      this.savedCoordinates.lat,
+      this.savedCoordinates.lng,
+      true
+    );
+  }
+
+  private updateResetMapButton(): void {
+    if (!this.resetMapButton) return;
+    const disabled = !this.savedCoordinates;
+    this.resetMapButton.setAttribute("aria-disabled", String(disabled));
+    if (disabled) this.resetMapButton.addClass("is-disabled");
+    else this.resetMapButton.removeClass("is-disabled");
   }
 
   private applyAddress(
@@ -844,19 +1589,102 @@ class FootprintStudioView extends ItemView {
   }
 
   private addPhotoFiles(files: File[]): void {
-    const imageFiles = files.filter(file => file.type.startsWith("image/"));
+    const imageFiles = files.filter(
+      file =>
+        file.type.startsWith("image/") || /\.(?:jpe?g|tiff?)$/i.test(file.name)
+    );
+    const addedPhotos: PhotoDraft[] = [];
     for (const file of imageFiles) {
       const fallbackAlt = baseName(file.name).replace(/[-_]+/g, " ");
-      this.photos.push({
+      const photo: PhotoDraft = {
         id: `new-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         file,
         previewUrl: URL.createObjectURL(file),
         alt: this.fields.place.value.trim() || fallbackAlt,
         caption: "",
         position: "center",
-      });
+        hidden: false,
+        coordinates: null,
+        capturedAt: "",
+        metadataPending: true,
+      };
+      this.photos.push(photo);
+      addedPhotos.push(photo);
     }
     this.renderPhotos();
+    void Promise.all(
+      addedPhotos.map(photo => this.loadPhotoMetadata(photo, false))
+    ).then(() => this.renderPhotos());
+  }
+
+  private async readPhotoMetadata(photo: PhotoDraft): Promise<PhotoExifMetadata | null> {
+    let buffer: ArrayBuffer | null = null;
+    if (photo.file) {
+      buffer = await photo.file.arrayBuffer();
+    } else if (photo.source && this.currentFile) {
+      const linked = this.app.metadataCache.getFirstLinkpathDest(
+        photo.source,
+        this.currentFile.path
+      );
+      if (linked instanceof TFile) buffer = await this.app.vault.readBinary(linked);
+    }
+    return buffer ? extractPhotoMetadata(buffer) : null;
+  }
+
+  private async loadPhotoMetadata(
+    photo: PhotoDraft,
+    renderAfter = true
+  ): Promise<void> {
+    try {
+      const metadata = await this.readPhotoMetadata(photo);
+      photo.coordinates = metadata?.coordinates ?? null;
+      photo.capturedAt = metadata?.capturedAt ?? "";
+    } catch (error) {
+      console.warn("Footprint Studio 自动读取照片信息失败", error);
+      photo.coordinates = null;
+      photo.capturedAt = "";
+    } finally {
+      photo.metadataPending = false;
+      if (renderAfter) this.renderPhotos();
+    }
+  }
+
+  private async applyPhotoMetadata(
+    photo: PhotoDraft,
+    button: HTMLButtonElement
+  ): Promise<void> {
+    button.disabled = true;
+    button.addClass("is-loading");
+    try {
+      const metadata = await this.readPhotoMetadata(photo);
+      if (!metadata) {
+        new Notice("这张照片没有可读取的拍摄坐标或时间");
+        return;
+      }
+      photo.coordinates = metadata.coordinates;
+      photo.capturedAt = metadata.capturedAt ?? "";
+      if (metadata.coordinates) {
+        this.setCoordinates(metadata.coordinates.lat, metadata.coordinates.lng, true);
+      }
+      if (metadata.capturedAt) {
+        this.fields.visitedAt.value = metadata.capturedAt.slice(0, 10);
+        this.fields.capturedTime.value = metadata.capturedAt.slice(11, 19);
+      }
+      if (metadata.coordinates && metadata.capturedAt) {
+        new Notice("已更新地图坐标、拍摄日期和时间");
+      } else if (metadata.coordinates) {
+        new Notice("已更新地图坐标；未读取到拍摄时间");
+      } else {
+        new Notice("已更新拍摄日期和时间；照片没有 GPS 坐标");
+      }
+      this.renderPhotos();
+    } catch (error) {
+      console.error("Footprint Studio 读取照片信息失败", error);
+      new Notice("读取照片信息失败");
+    } finally {
+      button.disabled = false;
+      button.removeClass("is-loading");
+    }
   }
 
   private renderPhotos(): void {
@@ -872,6 +1700,7 @@ class FootprintStudioView extends ItemView {
 
     this.photos.forEach((photo, index) => {
       const card = this.photosEl.createDiv({ cls: "footprint-studio-photo-card" });
+      if (photo.hidden) card.addClass("is-hidden");
       card.draggable = true;
       card.addEventListener("dragstart", event => {
         this.draggedPhoto = index;
@@ -895,9 +1724,31 @@ class FootprintStudioView extends ItemView {
 
       const preview = card.createDiv({ cls: "footprint-studio-photo-preview" });
       if (photo.previewUrl) {
-        preview.createEl("img", {
-          attr: { src: photo.previewUrl, alt: photo.alt || `照片 ${index + 1}` },
+        const previewLabel = photo.alt || `照片 ${index + 1}`;
+        const openButton = preview.createEl("button", {
+          cls: "footprint-studio-photo-open",
+          attr: {
+            type: "button",
+            "aria-label": `放大查看${previewLabel}`,
+          },
         });
+        const image = openButton.createEl("img", {
+          attr: {
+            src: photo.previewUrl,
+            alt: previewLabel,
+            loading: "lazy",
+            decoding: "async",
+          },
+        });
+        image.draggable = false;
+        const openPreview = () =>
+          new PhotoPreviewModal(
+            this.app,
+            photo.previewUrl,
+            previewLabel,
+            photo.caption
+          ).open();
+        openButton.addEventListener("click", openPreview);
       } else {
         const missing = preview.createDiv({ cls: "footprint-studio-photo-missing" });
         setIcon(missing, "image-off");
@@ -905,7 +1756,43 @@ class FootprintStudioView extends ItemView {
       }
       preview.createSpan({ cls: "footprint-studio-photo-index", text: String(index + 1) });
 
+      const gps = makeButton(
+        preview,
+        "",
+        "map-pin-check",
+        "footprint-studio-photo-metadata"
+      );
+      gps.setAttribute("aria-label", "读取照片信息");
+      gps.setAttribute("title", "读取照片信息");
+      gps.addEventListener("pointerdown", event => event.stopPropagation());
+      gps.addEventListener("click", () => void this.applyPhotoMetadata(photo, gps));
+
       const cardActions = preview.createDiv({ cls: "footprint-studio-photo-actions" });
+      const visibility = makeButton(
+        cardActions,
+        "",
+        photo.hidden ? "eye-off" : "eye"
+      );
+      const updateVisibility = () => {
+        const label = photo.hidden ? "在网站显示这张照片" : "在网站隐藏这张照片";
+        visibility.setAttribute("aria-label", label);
+        visibility.setAttribute("title", label);
+        visibility.setAttribute("aria-pressed", String(photo.hidden));
+        const icon = visibility.querySelector<HTMLElement>(
+          ".footprint-studio-button-icon"
+        );
+        if (icon) {
+          icon.empty();
+          setIcon(icon, photo.hidden ? "eye-off" : "eye");
+        }
+        if (photo.hidden) card.addClass("is-hidden");
+        else card.removeClass("is-hidden");
+      };
+      updateVisibility();
+      visibility.addEventListener("click", () => {
+        photo.hidden = !photo.hidden;
+        updateVisibility();
+      });
       const up = makeButton(cardActions, "", "arrow-left");
       up.setAttribute("aria-label", "向前移动");
       up.disabled = index === 0;
@@ -918,13 +1805,169 @@ class FootprintStudioView extends ItemView {
       remove.setAttribute("aria-label", "移除照片");
       remove.addEventListener("click", () => this.removePhoto(index));
 
-      const fields = card.createDiv({ cls: "footprint-studio-photo-fields" });
-      const alt = this.createCompactInput(fields, "替代文本", photo.alt);
-      alt.addEventListener("input", () => (photo.alt = alt.value));
-      const caption = this.createCompactInput(fields, "图片说明（可选）", photo.caption);
-      caption.addEventListener("input", () => (photo.caption = caption.value));
-      const position = this.createCompactInput(fields, "裁剪位置（可选）", photo.position);
-      position.addEventListener("input", () => (photo.position = position.value));
+      const positionControl = preview.createDiv({
+        cls: "footprint-studio-photo-position-control",
+      });
+      const positionLabels = new Map<string, string>([
+        ["left top", "左上"],
+        ["center top", "上方"],
+        ["right top", "右上"],
+        ["left center", "左侧"],
+        ["center", "居中"],
+        ["right center", "右侧"],
+        ["left bottom", "左下"],
+        ["center bottom", "下方"],
+        ["right bottom", "右下"],
+      ]);
+      const positionButton = positionControl.createEl("button", {
+        cls: "footprint-studio-photo-position-button",
+        attr: { type: "button" },
+      });
+      const positionIndicator = positionButton.createSpan({
+        cls: "footprint-studio-photo-position-indicator",
+      });
+      for (const position of positionLabels.keys()) {
+        const anchor = positionIndicator.createSpan({
+          cls: "footprint-studio-photo-position-anchor",
+        });
+        anchor.dataset.position = position;
+      }
+      const positionMenu = positionControl.createDiv({
+        cls: "footprint-studio-photo-position-menu",
+        attr: { role: "menu", "aria-label": "选择缩略图裁剪焦点" },
+      });
+      positionMenu.hidden = true;
+      const refreshPosition = () => {
+        const label = positionLabels.get(photo.position) ?? photo.position ?? "居中";
+        positionButton.setAttribute("aria-label", `裁剪焦点：${label}`);
+        positionButton.setAttribute("title", `裁剪焦点：${label}`);
+        const visiblePosition = positionLabels.has(photo.position)
+          ? photo.position
+          : "center";
+        for (const anchor of positionIndicator.querySelectorAll<HTMLElement>(
+          ".footprint-studio-photo-position-anchor"
+        )) {
+          if (anchor.dataset.position === visiblePosition) anchor.addClass("is-active");
+          else anchor.removeClass("is-active");
+        }
+        for (const option of positionMenu.querySelectorAll<HTMLElement>("button")) {
+          const selected = option.dataset.position === photo.position;
+          option.setAttribute("aria-checked", String(selected));
+          if (selected) option.addClass("is-selected");
+          else option.removeClass("is-selected");
+        }
+      };
+      for (const [position, label] of positionLabels) {
+        const option = positionMenu.createEl("button", {
+          cls: "footprint-studio-photo-position-option",
+          attr: {
+            type: "button",
+            role: "menuitemradio",
+            "aria-label": label,
+            title: label,
+          },
+        });
+        option.dataset.position = position;
+        option.createSpan({ cls: "footprint-studio-photo-position-dot" });
+        option.addEventListener("click", () => {
+          photo.position = position;
+          positionMenu.hidden = true;
+          positionButton.setAttribute("aria-expanded", "false");
+          refreshPosition();
+          positionButton.focus();
+        });
+      }
+      refreshPosition();
+      positionButton.setAttribute("aria-haspopup", "menu");
+      positionButton.setAttribute("aria-expanded", "false");
+      positionButton.addEventListener("click", () => {
+        positionMenu.hidden = !positionMenu.hidden;
+        positionButton.setAttribute("aria-expanded", String(!positionMenu.hidden));
+      });
+      positionControl.addEventListener("pointerdown", event => event.stopPropagation());
+      positionControl.addEventListener("focusout", () => {
+        window.setTimeout(() => {
+          if (!positionControl.contains(document.activeElement)) {
+            positionMenu.hidden = true;
+            positionButton.setAttribute("aria-expanded", "false");
+          }
+        }, 0);
+      });
+
+      const copy = preview.createDiv({ cls: "footprint-studio-photo-copy" });
+      const copyPreview = copy.createEl("button", {
+        cls: "footprint-studio-photo-copy-preview",
+        attr: {
+          type: "button",
+          "aria-label": "编辑照片文字",
+          "aria-haspopup": "dialog",
+          "aria-expanded": "false",
+        },
+      });
+      const altText = copyPreview.createSpan({
+        cls: "footprint-studio-photo-alt-text",
+      });
+      const captionText = copyPreview.createSpan({
+        cls: "footprint-studio-photo-caption-text",
+      });
+      const metadataText = copyPreview.createSpan({
+        cls: "footprint-studio-photo-exif",
+      });
+      const capturedAtText = metadataText.createSpan();
+      const coordinatesText = metadataText.createSpan();
+      const editor = copy.createDiv({ cls: "footprint-studio-photo-editor" });
+      editor.hidden = true;
+      const alt = this.createCompactInput(editor, "替代文本", photo.alt);
+      const caption = this.createCompactInput(editor, "图片说明（可选）", photo.caption);
+      const refreshCopy = () => {
+        altText.textContent = photo.alt.trim() || "添加替代文本";
+        captionText.textContent = photo.caption.trim();
+        captionText.hidden = !photo.caption.trim();
+        capturedAtText.textContent = photo.capturedAt
+          ? photo.capturedAt.replace("T", " ")
+          : "";
+        capturedAtText.hidden = !photo.capturedAt;
+        coordinatesText.textContent = photo.coordinates
+          ? `${photo.coordinates.lat.toFixed(5)}, ${photo.coordinates.lng.toFixed(5)}`
+          : "";
+        coordinatesText.hidden = !photo.coordinates;
+        metadataText.hidden =
+          !photo.metadataPending && !photo.capturedAt && !photo.coordinates;
+        if (photo.metadataPending) {
+          capturedAtText.textContent = "正在读取拍摄信息…";
+          capturedAtText.hidden = false;
+          coordinatesText.hidden = true;
+        }
+      };
+      alt.addEventListener("input", () => {
+        photo.alt = alt.value;
+        refreshCopy();
+      });
+      caption.addEventListener("input", () => {
+        photo.caption = caption.value;
+        refreshCopy();
+      });
+      refreshCopy();
+      copyPreview.addEventListener("click", () => {
+        editor.hidden = !editor.hidden;
+        copyPreview.setAttribute("aria-expanded", String(!editor.hidden));
+        if (!editor.hidden) alt.focus();
+      });
+      copy.addEventListener("pointerdown", event => event.stopPropagation());
+      copy.addEventListener("keydown", event => {
+        if (event.key !== "Escape") return;
+        editor.hidden = true;
+        copyPreview.setAttribute("aria-expanded", "false");
+        copyPreview.focus();
+      });
+      copy.addEventListener("focusout", () => {
+        window.setTimeout(() => {
+          if (!copy.contains(document.activeElement)) {
+            editor.hidden = true;
+            copyPreview.setAttribute("aria-expanded", "false");
+          }
+        }, 0);
+      });
     });
   }
 
@@ -954,18 +1997,47 @@ class FootprintStudioView extends ItemView {
     }
   }
 
-  private loadBlogPosts(): BlogPostOption[] {
+  private async loadBlogPosts(): Promise<BlogPostOption[]> {
     const prefix = `${normalizePath(this.plugin.settings.blogFolder)}/`;
-    return this.app.vault
-      .getMarkdownFiles()
-      .filter(file => file.path.startsWith(prefix))
-      .map(file => {
-        const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+    const files = this.app.vault.getFiles().filter(file => {
+      const extension = file.extension.toLowerCase();
+      return file.path.startsWith(prefix) && (extension === "md" || extension === "mdx");
+    });
+    const posts = await Promise.all(
+      files.map(async file => {
+        let frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
+          | Record<string, unknown>
+          | undefined;
+        if (!frontmatter) {
+          try {
+            const source = await this.app.vault.cachedRead(file);
+            const match = source.match(
+              /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
+            );
+            const parsed = match ? parseYaml(match[1]) : null;
+            if (parsed && typeof parsed === "object") {
+              frontmatter = parsed as Record<string, unknown>;
+            }
+          } catch (error) {
+            console.warn(`Footprint Studio 无法解析文章 frontmatter：${file.path}`, error);
+          }
+        }
         const slug = String(frontmatter?.slug ?? "").trim() || file.basename;
         const title = String(frontmatter?.title ?? "").trim() || file.basename;
-        return { id: slug, title, path: file.path };
+        const rawKeywords = frontmatter?.keywords;
+        const keywords = (
+          Array.isArray(rawKeywords)
+            ? rawKeywords
+            : rawKeywords == null
+              ? []
+              : [rawKeywords]
+        )
+          .map(value => String(value).trim())
+          .filter(Boolean);
+        return { id: slug, title, path: file.path, keywords };
       })
-      .sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
+    );
+    return posts.sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
   }
 
   private renderSelectedPosts(): void {
@@ -988,8 +2060,9 @@ class FootprintStudioView extends ItemView {
   private renderPostSuggestions(): void {
     if (!this.postsEl || !this.postSearchInput) return;
     this.postsEl.empty();
-    const query = this.postSearchInput.value.trim().toLocaleLowerCase("zh-CN");
-    if (!query) {
+    const query = this.postSearchInput.value.trim();
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery) {
       this.postsEl.hidden = true;
       return;
     }
@@ -997,7 +2070,9 @@ class FootprintStudioView extends ItemView {
       .filter(
         post =>
           !this.selectedPosts.has(post.id) &&
-          `${post.title} ${post.id}`.toLocaleLowerCase("zh-CN").includes(query)
+          `${post.title} ${post.id} ${post.keywords.join(" ")}`
+            .toLocaleLowerCase("zh-CN")
+            .includes(normalizedQuery)
       )
       .slice(0, 8);
 
@@ -1014,9 +2089,32 @@ class FootprintStudioView extends ItemView {
         cls: "footprint-studio-post",
         attr: { type: "button" },
       });
-      const text = button.createDiv();
-      text.createEl("strong", { text: post.title });
-      text.createEl("span", { text: post.id });
+      const text = button.createDiv({ cls: "footprint-studio-post-copy" });
+      const title = text.createEl("strong", {
+        cls: "footprint-studio-post-title",
+      });
+      appendHighlightedText(title, post.title, normalizedQuery);
+      const slug = text.createEl("span", {
+        cls: "footprint-studio-post-slug",
+      });
+      appendHighlightedText(slug, post.id, normalizedQuery);
+
+      const matchingKeywords = post.keywords.filter(keyword =>
+        normalizeSearchText(keyword).includes(normalizedQuery)
+      );
+      if (matchingKeywords.length) {
+        const keywords = text.createDiv({ cls: "footprint-studio-post-keywords" });
+        keywords.createSpan({
+          cls: "footprint-studio-post-keywords-label",
+          text: "关键词",
+        });
+        for (const keyword of matchingKeywords) {
+          const keywordEl = keywords.createSpan({
+            cls: "footprint-studio-post-keyword",
+          });
+          appendHighlightedText(keywordEl, keyword, normalizedQuery);
+        }
+      }
       button.addEventListener("mousedown", event => event.preventDefault());
       button.addEventListener("click", () => {
         this.selectedPosts.add(post.id);
@@ -1051,6 +2149,10 @@ class FootprintStudioView extends ItemView {
     }
     if (!this.photos.length) {
       new Notice("请至少选择一张照片");
+      return;
+    }
+    if (!this.photos.some(photo => !photo.hidden)) {
+      new Notice("请至少保留一张在网站展示的照片");
       return;
     }
 
@@ -1108,11 +2210,14 @@ class FootprintStudioView extends ItemView {
         savedFile = await this.app.vault.create(markdownPath, markdown);
       }
       this.currentFile = savedFile;
+      this.savedCoordinates = { lat: values.lat, lng: values.lng };
+      this.updateResetMapButton();
       this.refreshTitle();
       this.fields.fileName.value = savedFile.basename;
       this.fields.fileName.disabled = false;
       this.fileNameButton.disabled = false;
       this.renderPhotos();
+      this.app.workspace.requestSaveLayout();
       new Notice(`足迹已保存：${savedFile.path}`);
     } catch (error) {
       console.error("Footprint Studio save failed", error);
@@ -1127,6 +2232,7 @@ class FootprintStudioView extends ItemView {
   private readValues(): {
     fileName: string;
     visitedAt: string;
+    capturedTime: string;
     country: string;
     region: string;
     city: string;
@@ -1141,6 +2247,7 @@ class FootprintStudioView extends ItemView {
     return {
       fileName: this.fields.fileName.value.trim(),
       visitedAt: this.fields.visitedAt.value,
+      capturedTime: this.fields.capturedTime.value,
       country: this.fields.country.value.trim(),
       region: this.fields.region.value.trim(),
       city: this.fields.city.value.trim(),
@@ -1158,10 +2265,17 @@ class FootprintStudioView extends ItemView {
     const lines = [
       "---",
       `visitedAt: ${values.visitedAt}`,
+    ];
+    if (values.capturedTime) {
+      lines.push(
+        `capturedAt: ${yamlString(`${values.visitedAt}T${values.capturedTime}`)}`
+      );
+    }
+    lines.push(
       `country: ${yamlString(values.country)}`,
       `region: ${yamlString(values.region)}`,
-      `city: ${yamlString(values.city)}`,
-    ];
+      `city: ${yamlString(values.city)}`
+    );
     if (values.district) lines.push(`district: ${yamlString(values.district)}`);
     if (values.town) lines.push(`town: ${yamlString(values.town)}`);
     if (values.street) lines.push(`street: ${yamlString(values.street)}`);
@@ -1184,6 +2298,13 @@ class FootprintStudioView extends ItemView {
       lines.push(`    alt: ${yamlString(alt)}`);
       if (photo.caption.trim()) lines.push(`    caption: ${yamlString(photo.caption.trim())}`);
       if (photo.position.trim()) lines.push(`    position: ${yamlString(photo.position.trim())}`);
+      if (photo.hidden) lines.push("    hidden: true");
+      if (photo.capturedAt) lines.push(`    capturedAt: ${yamlString(photo.capturedAt)}`);
+      if (photo.coordinates) {
+        lines.push("    coordinates:");
+        lines.push(`      lat: ${photo.coordinates.lat}`);
+        lines.push(`      lng: ${photo.coordinates.lng}`);
+      }
     }
     lines.push("---", "", values.description, "");
     return lines.join("\n");
@@ -1264,6 +2385,21 @@ class FootprintStudioSettingTab extends PluginSettingTab {
               this.plugin.settings.defaultLng = number;
               await this.plugin.saveSettings();
             }
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("地图高度")
+      .setDesc("足迹编辑器中的地图高度，窄屏会自动限制在可视区域内。")
+      .addSlider(slider =>
+        slider
+          .setLimits(MAP_HEIGHT_MIN, MAP_HEIGHT_MAX, 20)
+          .setDynamicTooltip()
+          .setValue(this.plugin.settings.mapHeight)
+          .onChange(async value => {
+            this.plugin.settings.mapHeight = normalizeMapHeight(value);
+            this.plugin.refreshMapHeights();
+            await this.plugin.saveSettings();
           })
       );
 

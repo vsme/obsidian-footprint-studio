@@ -3263,20 +3263,20 @@ var require_leaflet_src = __commonJS({
           }
         }
       });
-      var control = function(options) {
+      var control2 = function(options) {
         return new Control(options);
       };
       Map2.include({
         // @method addControl(control: Control): this
         // Adds the given control to the map
-        addControl: function(control2) {
-          control2.addTo(this);
+        addControl: function(control3) {
+          control3.addTo(this);
           return this;
         },
         // @method removeControl(control: Control): this
         // Removes the given control from the map
-        removeControl: function(control2) {
-          control2.remove();
+        removeControl: function(control3) {
+          control3.remove();
           return this;
         },
         _initControlPos: function() {
@@ -3875,10 +3875,10 @@ var require_leaflet_src = __commonJS({
       Control.Zoom = Zoom;
       Control.Scale = Scale;
       Control.Attribution = Attribution;
-      control.layers = layers;
-      control.zoom = zoom;
-      control.scale = scale;
-      control.attribution = attribution;
+      control2.layers = layers;
+      control2.zoom = zoom;
+      control2.scale = scale;
+      control2.attribution = attribution;
       var Handler = Class.extend({
         initialize: function(map3) {
           this._map = map3;
@@ -9542,7 +9542,7 @@ var require_leaflet_src = __commonJS({
       exports2.canvas = canvas;
       exports2.circle = circle;
       exports2.circleMarker = circleMarker;
-      exports2.control = control;
+      exports2.control = control2;
       exports2.divIcon = divIcon2;
       exports2.extend = extend;
       exports2.featureGroup = featureGroup;
@@ -33903,6 +33903,9 @@ var DEFAULT_OPTIONS = {
 
 // src/main.ts
 var VIEW_TYPE = "footprint-studio-view";
+var MAP_HEIGHT_MIN = 300;
+var MAP_HEIGHT_MAX = 680;
+var MAP_HEIGHT_DEFAULT = 380;
 var DEFAULT_SETTINGS = {
   footprintsFolder: "footprints",
   attachmentsFolder: "attachment/footprints",
@@ -33910,8 +33913,277 @@ var DEFAULT_SETTINGS = {
   tileUrl: "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
   defaultLat: 35.8617,
   defaultLng: 104.1954,
-  defaultZoom: 4
+  defaultZoom: 4,
+  mapHeight: MAP_HEIGHT_DEFAULT
 };
+function normalizeMapHeight(value) {
+  const height = Number(value);
+  if (!Number.isFinite(height)) return MAP_HEIGHT_DEFAULT;
+  return Math.min(MAP_HEIGHT_MAX, Math.max(MAP_HEIGHT_MIN, Math.round(height)));
+}
+function normalizeSearchText(value) {
+  return value.toLocaleLowerCase("zh-CN");
+}
+function appendHighlightedText(parent, value, normalizedQuery) {
+  const normalizedValue = normalizeSearchText(value);
+  if (!normalizedQuery || normalizedValue.length !== value.length || !normalizedValue.includes(normalizedQuery)) {
+    parent.append(document.createTextNode(value));
+    return;
+  }
+  let offset = 0;
+  while (offset < value.length) {
+    const matchIndex = normalizedValue.indexOf(normalizedQuery, offset);
+    if (matchIndex === -1) {
+      parent.append(document.createTextNode(value.slice(offset)));
+      break;
+    }
+    if (matchIndex > offset) {
+      parent.append(document.createTextNode(value.slice(offset, matchIndex)));
+    }
+    parent.createEl("mark", {
+      cls: "footprint-studio-post-match",
+      text: value.slice(matchIndex, matchIndex + normalizedQuery.length)
+    });
+    offset = matchIndex + normalizedQuery.length;
+  }
+}
+function parseTiffGps(view, tiffOffset, tiffEnd) {
+  const hasRange = (offset, length) => Number.isSafeInteger(offset) && Number.isSafeInteger(length) && length >= 0 && offset >= tiffOffset && offset <= tiffEnd - length;
+  if (!hasRange(tiffOffset, 8)) return null;
+  const byteOrder = view.getUint16(tiffOffset, false);
+  const littleEndian = byteOrder === 18761;
+  if (!littleEndian && byteOrder !== 19789) return null;
+  const readUint16 = (offset) => hasRange(offset, 2) ? view.getUint16(offset, littleEndian) : null;
+  const readUint32 = (offset) => hasRange(offset, 4) ? view.getUint32(offset, littleEndian) : null;
+  if (readUint16(tiffOffset + 2) !== 42) return null;
+  const findEntry = (ifdRelativeOffset, wantedTag) => {
+    const ifdOffset = tiffOffset + ifdRelativeOffset;
+    const count = readUint16(ifdOffset);
+    if (count == null || count > 1024 || !hasRange(ifdOffset + 2, count * 12)) {
+      return null;
+    }
+    for (let index = 0; index < count; index += 1) {
+      const entryOffset = ifdOffset + 2 + index * 12;
+      if (readUint16(entryOffset) === wantedTag) return entryOffset;
+    }
+    return null;
+  };
+  const ifd0Offset = readUint32(tiffOffset + 4);
+  if (ifd0Offset == null) return null;
+  const gpsPointerEntry = findEntry(ifd0Offset, 34853);
+  if (gpsPointerEntry == null) return null;
+  const gpsPointerType = readUint16(gpsPointerEntry + 2);
+  const gpsPointerCount = readUint32(gpsPointerEntry + 4);
+  if (gpsPointerType !== 4 && gpsPointerType !== 13 || gpsPointerCount !== 1) {
+    return null;
+  }
+  const gpsIfdOffset = readUint32(gpsPointerEntry + 8);
+  if (gpsIfdOffset == null) return null;
+  const typeSizes = {
+    1: 1,
+    2: 1,
+    3: 2,
+    4: 4,
+    5: 8,
+    9: 4,
+    10: 8,
+    13: 4
+  };
+  const fieldData = (entryOffset) => {
+    const type = readUint16(entryOffset + 2);
+    const count = readUint32(entryOffset + 4);
+    if (type == null || count == null || count > 1e6) return null;
+    const typeSize = typeSizes[type];
+    if (!typeSize) return null;
+    const byteLength = typeSize * count;
+    if (!Number.isSafeInteger(byteLength)) return null;
+    let offset = entryOffset + 8;
+    if (byteLength > 4) {
+      const relativeOffset = readUint32(entryOffset + 8);
+      if (relativeOffset == null) return null;
+      offset = tiffOffset + relativeOffset;
+    }
+    return hasRange(offset, byteLength) ? { offset, type, count } : null;
+  };
+  const readAscii = (entryOffset) => {
+    if (entryOffset == null) return null;
+    const field = fieldData(entryOffset);
+    if (!field || field.type !== 2) return null;
+    let value = "";
+    for (let index = 0; index < field.count; index += 1) {
+      const character = view.getUint8(field.offset + index);
+      if (character !== 0) value += String.fromCharCode(character);
+    }
+    return value.trim().toUpperCase();
+  };
+  const readRationals = (entryOffset) => {
+    if (entryOffset == null) return null;
+    const field = fieldData(entryOffset);
+    if (!field || field.type !== 5 && field.type !== 10 || field.count < 3) {
+      return null;
+    }
+    const values = [];
+    for (let index = 0; index < 3; index += 1) {
+      const offset = field.offset + index * 8;
+      const numerator = field.type === 10 ? view.getInt32(offset, littleEndian) : view.getUint32(offset, littleEndian);
+      const denominator = field.type === 10 ? view.getInt32(offset + 4, littleEndian) : view.getUint32(offset + 4, littleEndian);
+      if (denominator === 0) return null;
+      values.push(numerator / denominator);
+    }
+    return values;
+  };
+  const latitudeRef = readAscii(findEntry(gpsIfdOffset, 1));
+  const latitudeDms = readRationals(findEntry(gpsIfdOffset, 2));
+  const longitudeRef = readAscii(findEntry(gpsIfdOffset, 3));
+  const longitudeDms = readRationals(findEntry(gpsIfdOffset, 4));
+  if (!latitudeDms || !longitudeDms || latitudeRef !== "N" && latitudeRef !== "S" || longitudeRef !== "E" && longitudeRef !== "W") {
+    return null;
+  }
+  const validDms = ([degrees, minutes, seconds]) => [degrees, minutes, seconds].every(Number.isFinite) && degrees >= 0 && minutes >= 0 && minutes < 60 && seconds >= 0 && seconds < 60;
+  if (!validDms(latitudeDms) || !validDms(longitudeDms)) return null;
+  let lat = latitudeDms[0] + latitudeDms[1] / 60 + latitudeDms[2] / 3600;
+  let lng = longitudeDms[0] + longitudeDms[1] / 60 + longitudeDms[2] / 3600;
+  if (latitudeRef === "S") lat *= -1;
+  if (longitudeRef === "W") lng *= -1;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng) || Math.abs(lat) > 90 || Math.abs(lng) > 180) {
+    return null;
+  }
+  return { lat, lng };
+}
+function normalizeExifDateTime(value) {
+  if (!value) return null;
+  const match = value.replace(/\0/g, "").trim().match(/^(\d{4}):(\d{2}):(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+  if (!match) return null;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const year = Number(yearText);
+  const month = Number(monthText);
+  const day = Number(dayText);
+  const hour = Number(hourText);
+  const minute = Number(minuteText);
+  const second = Number(secondText);
+  const isLeapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [
+    0,
+    31,
+    isLeapYear ? 29 : 28,
+    31,
+    30,
+    31,
+    30,
+    31,
+    31,
+    30,
+    31,
+    30,
+    31
+  ][month];
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > daysInMonth || hour < 0 || hour > 23 || minute < 0 || minute > 59 || second < 0 || second > 59) {
+    return null;
+  }
+  return `${yearText}-${monthText}-${dayText}T${hourText}:${minuteText}:${secondText}`;
+}
+function parseTiffCapturedAt(view, tiffOffset, tiffEnd) {
+  const hasRange = (offset, length) => Number.isSafeInteger(offset) && Number.isSafeInteger(length) && length >= 0 && offset >= tiffOffset && offset <= tiffEnd - length;
+  if (!hasRange(tiffOffset, 8)) return null;
+  const byteOrder = view.getUint16(tiffOffset, false);
+  const littleEndian = byteOrder === 18761;
+  if (!littleEndian && byteOrder !== 19789) return null;
+  const readUint16 = (offset) => hasRange(offset, 2) ? view.getUint16(offset, littleEndian) : null;
+  const readUint32 = (offset) => hasRange(offset, 4) ? view.getUint32(offset, littleEndian) : null;
+  if (readUint16(tiffOffset + 2) !== 42) return null;
+  const findEntry = (ifdRelativeOffset, wantedTag) => {
+    const ifdOffset = tiffOffset + ifdRelativeOffset;
+    const count = readUint16(ifdOffset);
+    if (count == null || count > 1024 || !hasRange(ifdOffset + 2, count * 12)) {
+      return null;
+    }
+    for (let index = 0; index < count; index += 1) {
+      const entryOffset = ifdOffset + 2 + index * 12;
+      if (readUint16(entryOffset) === wantedTag) return entryOffset;
+    }
+    return null;
+  };
+  const readAscii = (entryOffset) => {
+    if (entryOffset == null || readUint16(entryOffset + 2) !== 2) return null;
+    const count = readUint32(entryOffset + 4);
+    if (count == null || count < 1 || count > 1024) return null;
+    let offset = entryOffset + 8;
+    if (count > 4) {
+      const relativeOffset = readUint32(entryOffset + 8);
+      if (relativeOffset == null) return null;
+      offset = tiffOffset + relativeOffset;
+    }
+    if (!hasRange(offset, count)) return null;
+    let value = "";
+    for (let index = 0; index < count; index += 1) {
+      value += String.fromCharCode(view.getUint8(offset + index));
+    }
+    return value;
+  };
+  const ifd0Offset = readUint32(tiffOffset + 4);
+  if (ifd0Offset == null) return null;
+  let exifIfdOffset = null;
+  const exifPointer = findEntry(ifd0Offset, 34665);
+  if (exifPointer != null) {
+    const type = readUint16(exifPointer + 2);
+    const count = readUint32(exifPointer + 4);
+    if ((type === 4 || type === 13) && count === 1) {
+      exifIfdOffset = readUint32(exifPointer + 8);
+    }
+  }
+  const original = exifIfdOffset == null ? null : readAscii(findEntry(exifIfdOffset, 36867)) ?? readAscii(findEntry(exifIfdOffset, 36868));
+  const fallback = readAscii(findEntry(ifd0Offset, 306));
+  return normalizeExifDateTime(original ?? fallback);
+}
+function extractPhotoMetadata(buffer) {
+  const view = new DataView(buffer);
+  if (view.byteLength < 8) return null;
+  try {
+    const isTiffHeader = (offset2) => {
+      if (offset2 < 0 || offset2 + 4 > view.byteLength) return false;
+      const order = view.getUint16(offset2, false);
+      const littleEndian = order === 18761;
+      return (littleEndian || order === 19789) && view.getUint16(offset2 + 2, littleEndian) === 42;
+    };
+    const readMetadata = (tiffOffset, tiffEnd) => {
+      const coordinates = parseTiffGps(view, tiffOffset, tiffEnd);
+      const capturedAt = parseTiffCapturedAt(view, tiffOffset, tiffEnd);
+      return coordinates || capturedAt ? { coordinates, capturedAt } : null;
+    };
+    if (isTiffHeader(0)) return readMetadata(0, view.byteLength);
+    if (view.getUint16(0, false) !== 65496) return null;
+    let offset = 2;
+    while (offset + 4 <= view.byteLength) {
+      if (view.getUint8(offset) !== 255) {
+        offset += 1;
+        continue;
+      }
+      while (offset < view.byteLength && view.getUint8(offset) === 255) offset += 1;
+      if (offset >= view.byteLength) break;
+      const marker2 = view.getUint8(offset);
+      offset += 1;
+      if (marker2 === 217 || marker2 === 218) break;
+      if (marker2 === 1 || marker2 >= 208 && marker2 <= 215) continue;
+      if (offset + 2 > view.byteLength) break;
+      const segmentLength = view.getUint16(offset, false);
+      if (segmentLength < 2 || offset + segmentLength > view.byteLength) break;
+      const payloadOffset = offset + 2;
+      const segmentEnd = offset + segmentLength;
+      const hasExifHeader = marker2 === 225 && payloadOffset + 6 <= segmentEnd && view.getUint32(payloadOffset, false) === 1165519206 && view.getUint16(payloadOffset + 4, false) === 0;
+      if (hasExifHeader) {
+        const tiffOffset = payloadOffset + 6;
+        if (isTiffHeader(tiffOffset)) {
+          const metadata = readMetadata(tiffOffset, segmentEnd);
+          if (metadata) return metadata;
+        }
+      }
+      offset += segmentLength;
+    }
+  } catch (error) {
+    console.warn("Footprint Studio \u65E0\u6CD5\u89E3\u6790\u7167\u7247 EXIF", error);
+  }
+  return null;
+}
 function todayString() {
   const now = /* @__PURE__ */ new Date();
   const local = new Date(now.getTime() - now.getTimezoneOffset() * 6e4);
@@ -33925,6 +34197,18 @@ function dateString(value) {
   const text = String(value ?? "").trim();
   const match = text.match(/^\d{4}-\d{2}-\d{2}/);
   return match?.[0] ?? todayString();
+}
+function timeString(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return [value.getHours(), value.getMinutes(), value.getSeconds()].map((part) => String(part).padStart(2, "0")).join(":");
+  }
+  const match = String(value ?? "").match(/[T\s](\d{2}):(\d{2})(?::(\d{2}))?/);
+  return match ? `${match[1]}:${match[2]}:${match[3] ?? "00"}` : "";
+}
+function dateTimeString(value) {
+  if (value == null || String(value).trim() === "") return "";
+  const time = timeString(value);
+  return time ? `${dateString(value)}T${time}` : "";
 }
 function yamlString(value) {
   return JSON.stringify(value ?? "");
@@ -33976,14 +34260,65 @@ function makeButton(parent, label, icon, className) {
   parent.append(button);
   return button;
 }
+var PhotoPreviewModal = class extends import_obsidian.Modal {
+  constructor(app, imageUrl, imageAlt, imageCaption) {
+    super(app);
+    this.imageUrl = imageUrl;
+    this.imageAlt = imageAlt;
+    this.imageCaption = imageCaption;
+  }
+  onOpen() {
+    this.modalEl.addClass("footprint-studio-photo-modal");
+    this.setTitle(this.imageAlt || "\u7167\u7247\u9884\u89C8");
+    const image = this.contentEl.createEl("img", {
+      attr: { src: this.imageUrl, alt: this.imageAlt || "\u7167\u7247\u9884\u89C8" }
+    });
+    image.draggable = false;
+    if (this.imageCaption) {
+      this.contentEl.createEl("p", {
+        cls: "footprint-studio-photo-modal-caption",
+        text: this.imageCaption
+      });
+    }
+  }
+  onClose() {
+    this.contentEl.empty();
+  }
+};
 var FootprintStudioPlugin = class extends import_obsidian.Plugin {
   constructor() {
     super(...arguments);
     this.settings = DEFAULT_SETTINGS;
+    this.autoOpenRequest = 0;
+    this.knownLeaves = /* @__PURE__ */ new WeakSet();
+    this.transientLeaves = /* @__PURE__ */ new WeakSet();
+    this.nativeMarkdownLeaves = /* @__PURE__ */ new WeakMap();
   }
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    this.settings.mapHeight = normalizeMapHeight(this.settings.mapHeight);
     this.registerView(VIEW_TYPE, (leaf) => new FootprintStudioView(leaf, this));
+    this.app.workspace.onLayoutReady(() => {
+      this.app.workspace.iterateAllLeaves((leaf) => this.knownLeaves.add(leaf));
+      this.registerEvent(
+        this.app.workspace.on("file-open", (file) => {
+          if (!this.isFootprintFile(file)) return;
+          this.scheduleAutoOpen(file);
+        })
+      );
+      this.registerEvent(
+        this.app.workspace.on("active-leaf-change", (leaf) => {
+          if (leaf && !this.knownLeaves.has(leaf)) this.transientLeaves.add(leaf);
+          if (leaf) this.knownLeaves.add(leaf);
+          const file = this.getLeafFile(leaf);
+          const nativePath = leaf ? this.nativeMarkdownLeaves.get(leaf) : void 0;
+          if (leaf && nativePath && nativePath !== file?.path) {
+            this.nativeMarkdownLeaves.delete(leaf);
+          }
+          if (this.isFootprintFile(file)) this.scheduleAutoOpen(file, leaf);
+        })
+      );
+    });
     this.addRibbonIcon("map-pinned", "\u65B0\u5EFA\u8DB3\u8FF9", () => void this.openStudio());
     this.addRibbonIcon("square-pen", "\u7F16\u8F91\u5F53\u524D\u8DB3\u8FF9", () => {
       const activeFile = this.app.workspace.getActiveFile();
@@ -34015,6 +34350,9 @@ var FootprintStudioPlugin = class extends import_obsidian.Plugin {
         menu.addItem(
           (item) => item.setTitle("\u4F7F\u7528 Footprint Studio \u7F16\u8F91").setIcon("map-pinned").onClick(() => this.openStudio(file))
         );
+        menu.addItem(
+          (item) => item.setTitle("\u4F7F\u7528\u539F\u751F Markdown \u6253\u5F00").setIcon("file-text").onClick(() => void this.openNativeMarkdown(file))
+        );
       })
     );
     this.addSettingTab(new FootprintStudioSettingTab(this.app, this));
@@ -34027,25 +34365,93 @@ var FootprintStudioPlugin = class extends import_obsidian.Plugin {
   async saveSettings() {
     await this.saveData(this.settings);
   }
+  refreshMapHeights() {
+    for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE)) {
+      if (leaf.view instanceof FootprintStudioView) {
+        leaf.view.setMapHeight(this.settings.mapHeight);
+      }
+    }
+  }
   isFootprintFile(file) {
     const prefix = `${(0, import_obsidian.normalizePath)(this.settings.footprintsFolder)}/`;
-    return file instanceof import_obsidian.TFile && file.path.startsWith(prefix);
+    return file instanceof import_obsidian.TFile && file.extension.toLowerCase() === "md" && file.path.startsWith(prefix);
   }
-  async openStudio(file) {
+  getLeafFile(leaf) {
+    const file = leaf?.view?.file;
+    return file instanceof import_obsidian.TFile ? file : null;
+  }
+  scheduleAutoOpen(file, preferredLeaf) {
+    const request = ++this.autoOpenRequest;
+    window.setTimeout(() => {
+      if (request !== this.autoOpenRequest) return;
+      const leaf = this.resolveOpenedLeaf(file, preferredLeaf);
+      if (leaf && this.nativeMarkdownLeaves.get(leaf) === file.path) return;
+      const existingLeaf = this.findStudioLeaf(file);
+      if (existingLeaf) {
+        this.app.workspace.revealLeaf(existingLeaf);
+        if (leaf && leaf !== existingLeaf && this.transientLeaves.has(leaf)) {
+          this.transientLeaves.delete(leaf);
+          leaf.detach();
+        }
+        return;
+      }
+      if (!leaf || leaf.view instanceof FootprintStudioView) return;
+      this.transientLeaves.delete(leaf);
+      void this.openStudio(file, leaf);
+    }, 0);
+  }
+  findStudioLeaf(file) {
+    const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE).filter(
+      (leaf) => leaf.view instanceof FootprintStudioView && leaf.view.getEditingPath() === file.path
+    );
+    const recentLeaf = this.app.workspace.getMostRecentLeaf();
+    return leaves.find((leaf) => leaf === recentLeaf) ?? leaves[0] ?? null;
+  }
+  async openNativeMarkdown(file) {
+    const existingLeaf = this.app.workspace.getLeavesOfType("markdown").find((leaf2) => this.getLeafFile(leaf2)?.path === file.path);
+    const leaf = existingLeaf ?? this.app.workspace.getLeaf("tab");
+    this.nativeMarkdownLeaves.set(leaf, file.path);
+    try {
+      if (!existingLeaf) await leaf.openFile(file);
+      this.app.workspace.revealLeaf(leaf);
+    } catch (error) {
+      this.nativeMarkdownLeaves.delete(leaf);
+      console.error("Footprint Studio \u539F\u751F\u6253\u5F00\u5931\u8D25", error);
+      new import_obsidian.Notice("\u65E0\u6CD5\u4F7F\u7528\u539F\u751F Markdown \u6253\u5F00\u8FD9\u7BC7\u8DB3\u8FF9");
+    }
+  }
+  resolveOpenedLeaf(file, preferredLeaf) {
+    const matches = (leaf) => Boolean(
+      leaf && leaf.view.getViewType() === "markdown" && this.getLeafFile(leaf)?.path === file.path
+    );
+    if (matches(preferredLeaf)) return preferredLeaf;
+    const recentLeaf = this.app.workspace.getMostRecentLeaf();
+    if (matches(recentLeaf)) return recentLeaf;
+    const candidates = [];
+    this.app.workspace.iterateAllLeaves((leaf) => {
+      if (matches(leaf)) candidates.push(leaf);
+    });
+    return candidates.length === 1 ? candidates[0] : null;
+  }
+  async openStudio(file, targetLeaf) {
     if (file) {
-      const existingLeaf = this.app.workspace.getLeavesOfType(VIEW_TYPE).find(
-        (leaf2) => leaf2.view instanceof FootprintStudioView && leaf2.view.getEditingPath() === file.path
-      );
+      const existingLeaf = this.findStudioLeaf(file);
       if (existingLeaf) {
         this.app.workspace.revealLeaf(existingLeaf);
         return;
       }
     }
-    const leaf = this.app.workspace.getLeaf("tab");
-    await leaf.setViewState({ type: VIEW_TYPE, active: true });
+    const leaf = targetLeaf ?? this.app.workspace.getLeaf("tab");
+    await leaf.setViewState({
+      type: VIEW_TYPE,
+      state: { filePath: file?.path ?? null },
+      active: true
+    });
     this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
-    if (view instanceof FootprintStudioView) await view.openFile(file ?? null);
+    if (view instanceof FootprintStudioView && view.getEditingPath() !== (file?.path ?? null)) {
+      await view.openFile(file ?? null);
+    }
   }
 };
 var FootprintStudioView = class extends import_obsidian.ItemView {
@@ -34053,10 +34459,13 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     super(leaf);
     this.map = null;
     this.marker = null;
+    this.savedCoordinates = null;
+    this.resetMapButton = null;
     this.currentFile = null;
     this.photos = [];
     this.blogPosts = [];
     this.selectedPosts = /* @__PURE__ */ new Set();
+    this.instanceId = Math.random().toString(36).slice(2);
     this.fields = {};
     this.saving = false;
     this.draggedPhoto = -1;
@@ -34074,6 +34483,24 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   getEditingPath() {
     return this.currentFile?.path ?? null;
   }
+  getState() {
+    return { filePath: this.currentFile?.path ?? null };
+  }
+  async setState(state) {
+    const filePath = state && typeof state === "object" && "filePath" in state ? String(state.filePath ?? "") : "";
+    if (!filePath) {
+      if (this.currentFile) await this.openFile(null);
+      return;
+    }
+    if (this.currentFile?.path === filePath) return;
+    const file = this.app.vault.getAbstractFileByPath(filePath);
+    if (file instanceof import_obsidian.TFile) {
+      await this.openFile(file);
+      return;
+    }
+    this.resetForm();
+    new import_obsidian.Notice(`\u539F\u8DB3\u8FF9\u6587\u4EF6\u4E0D\u5B58\u5728\uFF1A${filePath}`);
+  }
   async onOpen() {
     await this.renderView();
   }
@@ -34081,6 +34508,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.disposePhotos();
     this.map?.remove();
     this.map = null;
+    this.resetMapButton = null;
   }
   async openFile(file) {
     if (!this.fields.visitedAt) await this.renderView();
@@ -34098,6 +34526,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.fields.fileName.disabled = false;
     this.fileNameButton.disabled = false;
     this.fields.visitedAt.value = dateString(frontmatter.visitedAt);
+    this.fields.capturedTime.value = timeString(frontmatter.capturedAt);
     this.fields.country.value = String(frontmatter.country ?? "");
     this.fields.region.value = String(frontmatter.region ?? "");
     this.fields.city.value = String(frontmatter.city ?? "");
@@ -34107,6 +34536,10 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.fields.place.value = String(frontmatter.place ?? "");
     this.fields.lat.value = String(frontmatter.coordinates?.lat ?? "");
     this.fields.lng.value = String(frontmatter.coordinates?.lng ?? "");
+    const savedLat = Number(frontmatter.coordinates?.lat);
+    const savedLng = Number(frontmatter.coordinates?.lng);
+    this.savedCoordinates = Number.isFinite(savedLat) && Number.isFinite(savedLng) ? { lat: savedLat, lng: savedLng } : null;
+    this.updateResetMapButton();
     this.draftInput.checked = Boolean(frontmatter.draft);
     this.selectedPosts = new Set(
       Array.isArray(frontmatter.relatedPosts) ? frontmatter.relatedPosts.map((value) => String(value)) : []
@@ -34124,7 +34557,16 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
           previewUrl: linked instanceof import_obsidian.TFile ? this.app.vault.getResourcePath(linked) : "",
           alt: String(photo.alt ?? ""),
           caption: String(photo.caption ?? ""),
-          position: String(photo.position ?? "")
+          position: String(photo.position ?? "center") || "center",
+          hidden: Boolean(photo.hidden),
+          coordinates: (() => {
+            const coordinates = photo.coordinates;
+            const lat = Number(coordinates?.lat);
+            const lng = Number(coordinates?.lng);
+            return Number.isFinite(lat) && Number.isFinite(lng) ? { lat, lng } : null;
+          })(),
+          capturedAt: dateTimeString(photo.capturedAt),
+          metadataPending: false
         };
       }
     );
@@ -34133,6 +34575,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.renderPostSuggestions();
     this.updateMarker(true);
     this.app.workspace.trigger("layout-change");
+    this.app.workspace.requestSaveLayout();
   }
   async renderView() {
     this.contentEl.empty();
@@ -34147,31 +34590,81 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     const saveButton = makeButton(actions, "\u4FDD\u5B58\u8DB3\u8FF9", "save", "mod-cta");
     saveButton.addEventListener("click", () => void this.saveFootprint(saveButton));
     const workspace = this.contentEl.createDiv({ cls: "footprint-studio-workspace" });
+    const photoPanel = workspace.createDiv({
+      cls: "footprint-studio-form footprint-studio-photo-panel"
+    });
+    this.renderPhotoSection(photoPanel);
     const mapPanel = workspace.createDiv({ cls: "footprint-studio-map-panel" });
-    this.renderMapToolbar(mapPanel);
-    const mapEl = mapPanel.createDiv({ cls: "footprint-studio-map" });
+    mapPanel.style.setProperty(
+      "--footprint-studio-map-height",
+      `${this.plugin.settings.mapHeight}px`
+    );
+    const mapHost = mapPanel.createDiv({ cls: "footprint-studio-map-host" });
+    this.renderMapToolbar(mapHost);
+    const mapEl = mapHost.createDiv({ cls: "footprint-studio-map" });
     mapEl.setAttribute("aria-label", "\u8DB3\u8FF9\u5750\u6807\u9009\u62E9\u5730\u56FE");
-    this.searchResultsEl = mapPanel.createDiv({
+    this.searchResultsEl = mapHost.createDiv({
       cls: "footprint-studio-search-results"
     });
     this.searchResultsEl.hidden = true;
-    const form = workspace.createDiv({ cls: "footprint-studio-form" });
+    const mapFields = mapPanel.createDiv({ cls: "footprint-studio-map-fields" });
+    this.renderMapFields(mapFields);
+    for (const eventName of ["pointerdown", "click", "dblclick"]) {
+      mapFields.addEventListener(eventName, (event) => event.stopPropagation());
+    }
+    mapFields.addEventListener(
+      "wheel",
+      (event) => event.stopPropagation(),
+      { passive: true }
+    );
+    const form = workspace.createDiv({
+      cls: "footprint-studio-form footprint-studio-details-form"
+    });
     this.renderBasicFields(form);
     this.renderRelatedSection(form);
-    this.renderPhotoSection(form);
     this.renderDescriptionSection(form);
-    this.blogPosts = this.loadBlogPosts();
+    this.blogPosts = await this.loadBlogPosts();
     this.resetForm();
     requestAnimationFrame(() => {
       this.map?.remove();
+      this.resetMapButton = null;
       this.map = L2.map(mapEl, {
-        zoomControl: true,
+        zoomControl: false,
         scrollWheelZoom: true,
         attributionControl: true
       }).setView(
         [this.plugin.settings.defaultLat, this.plugin.settings.defaultLng],
         this.plugin.settings.defaultZoom
       );
+      const zoomControl = L2.control.zoom({ position: "bottomleft" }).addTo(this.map).getContainer();
+      if (zoomControl) {
+        const addMapAction = (className, label, icon, action) => {
+          const button = zoomControl.createEl("a", {
+            cls: className,
+            attr: { href: "#", role: "button", "aria-label": label, title: label }
+          });
+          (0, import_obsidian.setIcon)(button, icon);
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            action();
+          });
+          return button;
+        };
+        addMapAction(
+          "footprint-studio-map-center-control",
+          "\u56DE\u5230\u5F53\u524D\u6807\u8BB0",
+          "locate-fixed",
+          () => this.centerCurrentMarker()
+        );
+        this.resetMapButton = addMapAction(
+          "footprint-studio-map-reset-control",
+          "\u6062\u590D\u5DF2\u4FDD\u5B58\u5750\u6807",
+          "rotate-ccw",
+          () => this.resetSavedMarker()
+        );
+        this.updateResetMapButton();
+      }
       L2.tileLayer(this.plugin.settings.tileUrl, {
         maxZoom: 19,
         attribution: "\xA9 OpenStreetMap contributors"
@@ -34184,14 +34677,30 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   }
   renderMapToolbar(parent) {
     const toolbar = parent.createDiv({ cls: "footprint-studio-map-toolbar" });
-    const searchInput = toolbar.createEl("input", {
+    const searchControl = toolbar.createDiv({
+      cls: "footprint-studio-map-search-control"
+    });
+    const searchInput = searchControl.createEl("input", {
       type: "search",
       placeholder: "\u641C\u7D22\u57CE\u5E02\u6216\u666F\u70B9",
       attr: { "aria-label": "\u641C\u7D22\u5730\u56FE\u5730\u70B9" }
     });
-    const searchButton = makeButton(toolbar, "\u641C\u7D22", "search");
-    const locateButton = makeButton(toolbar, "\u5F53\u524D\u4F4D\u7F6E", "locate-fixed");
-    const reverseButton = makeButton(toolbar, "\u8865\u5168\u5730\u70B9", "map-pin-check");
+    const searchButton = makeButton(
+      searchControl,
+      "",
+      "search",
+      "footprint-studio-map-search-button"
+    );
+    searchButton.setAttribute("aria-label", "\u641C\u7D22\u5730\u56FE\u5730\u70B9");
+    searchButton.setAttribute("title", "\u641C\u7D22");
+    const reverseButton = makeButton(
+      toolbar,
+      "\u8865\u5168\u5730\u70B9",
+      "map-pin-check",
+      "footprint-studio-map-geocode-button"
+    );
+    reverseButton.setAttribute("title", "\u6839\u636E\u5F53\u524D\u5750\u6807\u8865\u5168\u5730\u70B9");
+    reverseButton.addEventListener("click", () => void this.reverseGeocode());
     const runSearch = () => void this.searchPlace(searchInput.value);
     searchButton.addEventListener("click", runSearch);
     searchInput.addEventListener("keydown", (event) => {
@@ -34200,12 +34709,19 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
         runSearch();
       }
     });
-    locateButton.addEventListener("click", () => this.locateUser());
-    reverseButton.addEventListener("click", () => void this.reverseGeocode());
+  }
+  setMapHeight(height) {
+    const mapPanel = this.contentEl.querySelector(
+      ".footprint-studio-map-panel"
+    );
+    mapPanel?.style.setProperty(
+      "--footprint-studio-map-height",
+      `${normalizeMapHeight(height)}px`
+    );
+    requestAnimationFrame(() => this.map?.invalidateSize({ pan: false }));
   }
   renderBasicFields(parent) {
-    const section = this.createSection(parent, "\u57FA\u7840\u4FE1\u606F", "map-pin");
-    const grid = section.createDiv({ cls: "footprint-studio-field-grid" });
+    const grid = parent.createDiv({ cls: "footprint-studio-field-grid" });
     this.fields.fileName = this.createInput(grid, "\u6587\u4EF6\u540D", "fileName", "\u4F8B\u5982 2026-07-17-panmen");
     const fileNameControl = document.createElement("div");
     fileNameControl.className = "footprint-studio-file-name-control";
@@ -34218,36 +34734,70 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       "footprint-studio-generate-name"
     );
     this.fileNameButton.addEventListener("click", () => this.generateFileName());
-    this.fields.visitedAt = this.createInput(grid, "\u65E5\u671F", "visitedAt", "", "date");
-    this.fields.lat = this.createInput(grid, "\u7EAC\u5EA6", "lat", "31.2883", "number");
-    this.fields.lng = this.createInput(grid, "\u7ECF\u5EA6", "lng", "120.6183", "number");
-    this.fields.country = this.createInput(grid, "\u56FD\u5BB6", "country", "\u4E2D\u56FD");
-    this.fields.region = this.createInput(grid, "\u7701 / \u5730\u533A", "region", "\u6C5F\u82CF");
-    this.fields.city = this.createInput(grid, "\u57CE\u5E02", "city", "\u82CF\u5DDE");
-    this.fields.district = this.createInput(grid, "\u533A / \u53BF", "district", "\u59D1\u82CF\u533A");
-    this.fields.town = this.createInput(grid, "\u4E61\u9547 / \u8857\u9053", "town", "\u6CA7\u6D6A\u8857\u9053");
-    this.fields.street = this.createInput(grid, "\u9053\u8DEF / \u95E8\u724C", "street", "\u4E1C\u5927\u8857 49 \u53F7");
-    this.fields.place = this.createInput(grid, "\u5177\u4F53\u5730\u70B9", "place", "\u76D8\u95E8");
+    const draftLabel = parent.createEl("label", { cls: "footprint-studio-toggle" });
+    this.draftInput = draftLabel.createEl("input", { type: "checkbox" });
+    draftLabel.createSpan({ text: "\u4FDD\u5B58\u4E3A\u8349\u7A3F\uFF08\u7F51\u7AD9\u4E0D\u4F1A\u5C55\u793A\uFF09" });
+  }
+  renderMapFields(parent) {
+    this.fields.visitedAt = this.createInput(
+      parent,
+      "\u62CD\u6444\u65E5\u671F",
+      "visitedAt",
+      "",
+      "date"
+    );
+    this.fields.capturedTime = this.createInput(
+      parent,
+      "\u62CD\u6444\u65F6\u95F4",
+      "capturedTime",
+      "",
+      "time"
+    );
+    this.fields.capturedTime.setAttribute("step", "1");
+    this.fields.lat = this.createInput(
+      parent,
+      "\u7EAC\u5EA6",
+      "lat",
+      "31.2883",
+      "number"
+    );
+    this.fields.lng = this.createInput(
+      parent,
+      "\u7ECF\u5EA6",
+      "lng",
+      "120.6183",
+      "number"
+    );
+    this.fields.country = this.createInput(parent, "\u56FD\u5BB6", "country", "\u4E2D\u56FD");
+    this.fields.region = this.createInput(parent, "\u7701 / \u5730\u533A", "region", "\u6C5F\u82CF");
+    this.fields.city = this.createInput(parent, "\u57CE\u5E02", "city", "\u82CF\u5DDE");
+    this.fields.district = this.createInput(parent, "\u533A / \u53BF", "district", "\u59D1\u82CF\u533A");
+    this.fields.town = this.createInput(parent, "\u4E61\u9547 / \u8857\u9053", "town", "\u6CA7\u6D6A\u8857\u9053");
+    this.fields.street = this.createInput(parent, "\u9053\u8DEF / \u95E8\u724C", "street", "\u4E1C\u5927\u8857 49 \u53F7");
+    this.fields.place = this.createInput(parent, "\u5177\u4F53\u5730\u70B9", "place", "\u76D8\u95E8");
     this.fields.lat.setAttribute("step", "any");
     this.fields.lng.setAttribute("step", "any");
     for (const name of ["lat", "lng"]) {
       this.fields[name].addEventListener("change", () => this.updateMarker(false));
     }
-    const draftLabel = section.createEl("label", { cls: "footprint-studio-toggle" });
-    this.draftInput = draftLabel.createEl("input", { type: "checkbox" });
-    draftLabel.createSpan({ text: "\u4FDD\u5B58\u4E3A\u8349\u7A3F\uFF08\u7F51\u7AD9\u4E0D\u4F1A\u5C55\u793A\uFF09" });
   }
   renderRelatedSection(parent) {
-    const section = this.createSection(parent, "\u5173\u8054\u6587\u7AE0", "link-2");
-    const control = section.createDiv({ cls: "footprint-studio-related-control" });
-    this.selectedPostsEl = control.createDiv({ cls: "footprint-studio-selected-posts" });
-    this.postSearchInput = control.createEl("input", {
-      type: "search",
-      placeholder: "\u8F93\u5165\u6807\u9898\u6216 slug \u641C\u7D22\u5E76\u6DFB\u52A0\u6587\u7AE0",
-      cls: "footprint-studio-post-search",
-      attr: { autocomplete: "off" }
+    const inputId = `footprint-studio-post-search-${this.instanceId}`;
+    const field = parent.createDiv({ cls: "footprint-studio-details-field" });
+    field.createEl("label", {
+      cls: "footprint-studio-details-label",
+      text: "\u5173\u8054\u6587\u7AE0",
+      attr: { for: inputId }
     });
-    this.postsEl = control.createDiv({ cls: "footprint-studio-post-list" });
+    const control2 = field.createDiv({ cls: "footprint-studio-related-control" });
+    this.selectedPostsEl = control2.createDiv({ cls: "footprint-studio-selected-posts" });
+    this.postSearchInput = control2.createEl("input", {
+      type: "search",
+      placeholder: "\u8F93\u5165\u6807\u9898\u3001slug \u6216\u5173\u952E\u8BCD\u641C\u7D22\u6587\u7AE0",
+      cls: "footprint-studio-post-search",
+      attr: { id: inputId, autocomplete: "off" }
+    });
+    this.postsEl = control2.createDiv({ cls: "footprint-studio-post-list" });
     this.postsEl.hidden = true;
     this.postSearchInput.addEventListener("input", () => this.renderPostSuggestions());
     this.postSearchInput.addEventListener("focus", () => this.renderPostSuggestions());
@@ -34307,11 +34857,17 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     });
   }
   renderDescriptionSection(parent) {
-    const section = this.createSection(parent, "\u6587\u5B57\u8BB0\u5F55", "text-cursor-input");
-    this.fields.description = section.createEl("textarea", {
+    const inputId = `footprint-studio-description-${this.instanceId}`;
+    const field = parent.createDiv({ cls: "footprint-studio-details-field" });
+    field.createEl("label", {
+      cls: "footprint-studio-details-label",
+      text: "\u6587\u5B57\u8BB0\u5F55",
+      attr: { for: inputId }
+    });
+    this.fields.description = field.createEl("textarea", {
       cls: "footprint-studio-description",
       placeholder: "\u5199\u4E0B\u5F53\u65F6\u770B\u5230\u7684\u5149\u3001\u5929\u6C14\u6216\u5FC3\u60C5\u2026\u2026",
-      attr: { rows: "7" }
+      attr: { id: inputId, rows: "7" }
     });
   }
   createSection(parent, title, icon) {
@@ -34335,6 +34891,8 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   }
   resetForm() {
     this.currentFile = null;
+    this.savedCoordinates = null;
+    this.updateResetMapButton();
     this.refreshTitle();
     this.disposePhotos();
     this.photos = [];
@@ -34410,7 +34968,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.searchResultsEl.createDiv({ cls: "footprint-studio-searching", text: "\u6B63\u5728\u641C\u7D22\u2026" });
     try {
       const response = await (0, import_obsidian.requestUrl)({
-        url: `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&q=${encodeURIComponent(text)}`,
+        url: `https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=5&q=${encodeURIComponent(text)}`,
         headers: { "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.6" }
       });
       const results = response.json;
@@ -34440,20 +34998,6 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       this.searchResultsEl.createDiv({ text: "\u641C\u7D22\u5931\u8D25\uFF0C\u8BF7\u68C0\u67E5\u7F51\u7EDC\u540E\u91CD\u8BD5" });
     }
   }
-  locateUser() {
-    if (!navigator.geolocation) {
-      new import_obsidian.Notice("\u5F53\u524D\u8BBE\u5907\u4E0D\u652F\u6301\u5B9A\u4F4D");
-      return;
-    }
-    navigator.geolocation.getCurrentPosition(
-      (position) => {
-        this.setCoordinates(position.coords.latitude, position.coords.longitude, true);
-        void this.reverseGeocode();
-      },
-      () => new import_obsidian.Notice("\u65E0\u6CD5\u83B7\u53D6\u5F53\u524D\u4F4D\u7F6E\uFF0C\u8BF7\u68C0\u67E5\u7CFB\u7EDF\u5B9A\u4F4D\u6743\u9650"),
-      { enableHighAccuracy: true, timeout: 1e4 }
-    );
-  }
   async reverseGeocode() {
     const lat = Number(this.fields.lat.value);
     const lng = Number(this.fields.lng.value);
@@ -34473,6 +35017,35 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       console.error("Footprint Studio reverse geocoding failed", error);
       new import_obsidian.Notice("\u5730\u70B9\u53CD\u67E5\u5931\u8D25\uFF0C\u8BF7\u624B\u52A8\u586B\u5199\u6216\u7A0D\u540E\u91CD\u8BD5");
     }
+  }
+  centerCurrentMarker() {
+    const lat = Number(this.fields.lat.value);
+    const lng = Number(this.fields.lng.value);
+    if (!this.map || !Number.isFinite(lat) || !Number.isFinite(lng)) {
+      new import_obsidian.Notice("\u8BF7\u5148\u5728\u5730\u56FE\u4E0A\u9009\u62E9\u5750\u6807");
+      return;
+    }
+    this.map.setView([lat, lng], Math.max(this.map.getZoom(), 15), {
+      animate: true
+    });
+  }
+  resetSavedMarker() {
+    if (!this.savedCoordinates) {
+      new import_obsidian.Notice("\u5F53\u524D\u8DB3\u8FF9\u8FD8\u6CA1\u6709\u5DF2\u4FDD\u5B58\u7684\u5750\u6807");
+      return;
+    }
+    this.setCoordinates(
+      this.savedCoordinates.lat,
+      this.savedCoordinates.lng,
+      true
+    );
+  }
+  updateResetMapButton() {
+    if (!this.resetMapButton) return;
+    const disabled = !this.savedCoordinates;
+    this.resetMapButton.setAttribute("aria-disabled", String(disabled));
+    if (disabled) this.resetMapButton.addClass("is-disabled");
+    else this.resetMapButton.removeClass("is-disabled");
   }
   applyAddress(address, name, displayName = "") {
     const displayParts = displayName.split(",").map((part) => part.trim()).filter(Boolean);
@@ -34529,19 +35102,92 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.fields.place.value = placeParts.join(" \xB7 ");
   }
   addPhotoFiles(files) {
-    const imageFiles = files.filter((file) => file.type.startsWith("image/"));
+    const imageFiles = files.filter(
+      (file) => file.type.startsWith("image/") || /\.(?:jpe?g|tiff?)$/i.test(file.name)
+    );
+    const addedPhotos = [];
     for (const file of imageFiles) {
       const fallbackAlt = baseName(file.name).replace(/[-_]+/g, " ");
-      this.photos.push({
+      const photo = {
         id: `new-${Date.now()}-${Math.random().toString(36).slice(2)}`,
         file,
         previewUrl: URL.createObjectURL(file),
         alt: this.fields.place.value.trim() || fallbackAlt,
         caption: "",
-        position: "center"
-      });
+        position: "center",
+        hidden: false,
+        coordinates: null,
+        capturedAt: "",
+        metadataPending: true
+      };
+      this.photos.push(photo);
+      addedPhotos.push(photo);
     }
     this.renderPhotos();
+    void Promise.all(
+      addedPhotos.map((photo) => this.loadPhotoMetadata(photo, false))
+    ).then(() => this.renderPhotos());
+  }
+  async readPhotoMetadata(photo) {
+    let buffer = null;
+    if (photo.file) {
+      buffer = await photo.file.arrayBuffer();
+    } else if (photo.source && this.currentFile) {
+      const linked = this.app.metadataCache.getFirstLinkpathDest(
+        photo.source,
+        this.currentFile.path
+      );
+      if (linked instanceof import_obsidian.TFile) buffer = await this.app.vault.readBinary(linked);
+    }
+    return buffer ? extractPhotoMetadata(buffer) : null;
+  }
+  async loadPhotoMetadata(photo, renderAfter = true) {
+    try {
+      const metadata = await this.readPhotoMetadata(photo);
+      photo.coordinates = metadata?.coordinates ?? null;
+      photo.capturedAt = metadata?.capturedAt ?? "";
+    } catch (error) {
+      console.warn("Footprint Studio \u81EA\u52A8\u8BFB\u53D6\u7167\u7247\u4FE1\u606F\u5931\u8D25", error);
+      photo.coordinates = null;
+      photo.capturedAt = "";
+    } finally {
+      photo.metadataPending = false;
+      if (renderAfter) this.renderPhotos();
+    }
+  }
+  async applyPhotoMetadata(photo, button) {
+    button.disabled = true;
+    button.addClass("is-loading");
+    try {
+      const metadata = await this.readPhotoMetadata(photo);
+      if (!metadata) {
+        new import_obsidian.Notice("\u8FD9\u5F20\u7167\u7247\u6CA1\u6709\u53EF\u8BFB\u53D6\u7684\u62CD\u6444\u5750\u6807\u6216\u65F6\u95F4");
+        return;
+      }
+      photo.coordinates = metadata.coordinates;
+      photo.capturedAt = metadata.capturedAt ?? "";
+      if (metadata.coordinates) {
+        this.setCoordinates(metadata.coordinates.lat, metadata.coordinates.lng, true);
+      }
+      if (metadata.capturedAt) {
+        this.fields.visitedAt.value = metadata.capturedAt.slice(0, 10);
+        this.fields.capturedTime.value = metadata.capturedAt.slice(11, 19);
+      }
+      if (metadata.coordinates && metadata.capturedAt) {
+        new import_obsidian.Notice("\u5DF2\u66F4\u65B0\u5730\u56FE\u5750\u6807\u3001\u62CD\u6444\u65E5\u671F\u548C\u65F6\u95F4");
+      } else if (metadata.coordinates) {
+        new import_obsidian.Notice("\u5DF2\u66F4\u65B0\u5730\u56FE\u5750\u6807\uFF1B\u672A\u8BFB\u53D6\u5230\u62CD\u6444\u65F6\u95F4");
+      } else {
+        new import_obsidian.Notice("\u5DF2\u66F4\u65B0\u62CD\u6444\u65E5\u671F\u548C\u65F6\u95F4\uFF1B\u7167\u7247\u6CA1\u6709 GPS \u5750\u6807");
+      }
+      this.renderPhotos();
+    } catch (error) {
+      console.error("Footprint Studio \u8BFB\u53D6\u7167\u7247\u4FE1\u606F\u5931\u8D25", error);
+      new import_obsidian.Notice("\u8BFB\u53D6\u7167\u7247\u4FE1\u606F\u5931\u8D25");
+    } finally {
+      button.disabled = false;
+      button.removeClass("is-loading");
+    }
   }
   renderPhotos() {
     if (!this.photosEl) return;
@@ -34555,6 +35201,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     }
     this.photos.forEach((photo, index) => {
       const card = this.photosEl.createDiv({ cls: "footprint-studio-photo-card" });
+      if (photo.hidden) card.addClass("is-hidden");
       card.draggable = true;
       card.addEventListener("dragstart", (event) => {
         this.draggedPhoto = index;
@@ -34577,16 +35224,72 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       });
       const preview = card.createDiv({ cls: "footprint-studio-photo-preview" });
       if (photo.previewUrl) {
-        preview.createEl("img", {
-          attr: { src: photo.previewUrl, alt: photo.alt || `\u7167\u7247 ${index + 1}` }
+        const previewLabel = photo.alt || `\u7167\u7247 ${index + 1}`;
+        const openButton = preview.createEl("button", {
+          cls: "footprint-studio-photo-open",
+          attr: {
+            type: "button",
+            "aria-label": `\u653E\u5927\u67E5\u770B${previewLabel}`
+          }
         });
+        const image = openButton.createEl("img", {
+          attr: {
+            src: photo.previewUrl,
+            alt: previewLabel,
+            loading: "lazy",
+            decoding: "async"
+          }
+        });
+        image.draggable = false;
+        const openPreview = () => new PhotoPreviewModal(
+          this.app,
+          photo.previewUrl,
+          previewLabel,
+          photo.caption
+        ).open();
+        openButton.addEventListener("click", openPreview);
       } else {
         const missing = preview.createDiv({ cls: "footprint-studio-photo-missing" });
         (0, import_obsidian.setIcon)(missing, "image-off");
         missing.createSpan({ text: "\u627E\u4E0D\u5230\u539F\u56FE" });
       }
       preview.createSpan({ cls: "footprint-studio-photo-index", text: String(index + 1) });
+      const gps = makeButton(
+        preview,
+        "",
+        "map-pin-check",
+        "footprint-studio-photo-metadata"
+      );
+      gps.setAttribute("aria-label", "\u8BFB\u53D6\u7167\u7247\u4FE1\u606F");
+      gps.setAttribute("title", "\u8BFB\u53D6\u7167\u7247\u4FE1\u606F");
+      gps.addEventListener("pointerdown", (event) => event.stopPropagation());
+      gps.addEventListener("click", () => void this.applyPhotoMetadata(photo, gps));
       const cardActions = preview.createDiv({ cls: "footprint-studio-photo-actions" });
+      const visibility = makeButton(
+        cardActions,
+        "",
+        photo.hidden ? "eye-off" : "eye"
+      );
+      const updateVisibility = () => {
+        const label = photo.hidden ? "\u5728\u7F51\u7AD9\u663E\u793A\u8FD9\u5F20\u7167\u7247" : "\u5728\u7F51\u7AD9\u9690\u85CF\u8FD9\u5F20\u7167\u7247";
+        visibility.setAttribute("aria-label", label);
+        visibility.setAttribute("title", label);
+        visibility.setAttribute("aria-pressed", String(photo.hidden));
+        const icon = visibility.querySelector(
+          ".footprint-studio-button-icon"
+        );
+        if (icon) {
+          icon.empty();
+          (0, import_obsidian.setIcon)(icon, photo.hidden ? "eye-off" : "eye");
+        }
+        if (photo.hidden) card.addClass("is-hidden");
+        else card.removeClass("is-hidden");
+      };
+      updateVisibility();
+      visibility.addEventListener("click", () => {
+        photo.hidden = !photo.hidden;
+        updateVisibility();
+      });
       const up = makeButton(cardActions, "", "arrow-left");
       up.setAttribute("aria-label", "\u5411\u524D\u79FB\u52A8");
       up.disabled = index === 0;
@@ -34598,13 +35301,161 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       const remove = makeButton(cardActions, "", "trash-2");
       remove.setAttribute("aria-label", "\u79FB\u9664\u7167\u7247");
       remove.addEventListener("click", () => this.removePhoto(index));
-      const fields = card.createDiv({ cls: "footprint-studio-photo-fields" });
-      const alt = this.createCompactInput(fields, "\u66FF\u4EE3\u6587\u672C", photo.alt);
-      alt.addEventListener("input", () => photo.alt = alt.value);
-      const caption = this.createCompactInput(fields, "\u56FE\u7247\u8BF4\u660E\uFF08\u53EF\u9009\uFF09", photo.caption);
-      caption.addEventListener("input", () => photo.caption = caption.value);
-      const position = this.createCompactInput(fields, "\u88C1\u526A\u4F4D\u7F6E\uFF08\u53EF\u9009\uFF09", photo.position);
-      position.addEventListener("input", () => photo.position = position.value);
+      const positionControl = preview.createDiv({
+        cls: "footprint-studio-photo-position-control"
+      });
+      const positionLabels = /* @__PURE__ */ new Map([
+        ["left top", "\u5DE6\u4E0A"],
+        ["center top", "\u4E0A\u65B9"],
+        ["right top", "\u53F3\u4E0A"],
+        ["left center", "\u5DE6\u4FA7"],
+        ["center", "\u5C45\u4E2D"],
+        ["right center", "\u53F3\u4FA7"],
+        ["left bottom", "\u5DE6\u4E0B"],
+        ["center bottom", "\u4E0B\u65B9"],
+        ["right bottom", "\u53F3\u4E0B"]
+      ]);
+      const positionButton = positionControl.createEl("button", {
+        cls: "footprint-studio-photo-position-button",
+        attr: { type: "button" }
+      });
+      const positionIndicator = positionButton.createSpan({
+        cls: "footprint-studio-photo-position-indicator"
+      });
+      for (const position of positionLabels.keys()) {
+        const anchor = positionIndicator.createSpan({
+          cls: "footprint-studio-photo-position-anchor"
+        });
+        anchor.dataset.position = position;
+      }
+      const positionMenu = positionControl.createDiv({
+        cls: "footprint-studio-photo-position-menu",
+        attr: { role: "menu", "aria-label": "\u9009\u62E9\u7F29\u7565\u56FE\u88C1\u526A\u7126\u70B9" }
+      });
+      positionMenu.hidden = true;
+      const refreshPosition = () => {
+        const label = positionLabels.get(photo.position) ?? photo.position ?? "\u5C45\u4E2D";
+        positionButton.setAttribute("aria-label", `\u88C1\u526A\u7126\u70B9\uFF1A${label}`);
+        positionButton.setAttribute("title", `\u88C1\u526A\u7126\u70B9\uFF1A${label}`);
+        const visiblePosition = positionLabels.has(photo.position) ? photo.position : "center";
+        for (const anchor of positionIndicator.querySelectorAll(
+          ".footprint-studio-photo-position-anchor"
+        )) {
+          if (anchor.dataset.position === visiblePosition) anchor.addClass("is-active");
+          else anchor.removeClass("is-active");
+        }
+        for (const option of positionMenu.querySelectorAll("button")) {
+          const selected = option.dataset.position === photo.position;
+          option.setAttribute("aria-checked", String(selected));
+          if (selected) option.addClass("is-selected");
+          else option.removeClass("is-selected");
+        }
+      };
+      for (const [position, label] of positionLabels) {
+        const option = positionMenu.createEl("button", {
+          cls: "footprint-studio-photo-position-option",
+          attr: {
+            type: "button",
+            role: "menuitemradio",
+            "aria-label": label,
+            title: label
+          }
+        });
+        option.dataset.position = position;
+        option.createSpan({ cls: "footprint-studio-photo-position-dot" });
+        option.addEventListener("click", () => {
+          photo.position = position;
+          positionMenu.hidden = true;
+          positionButton.setAttribute("aria-expanded", "false");
+          refreshPosition();
+          positionButton.focus();
+        });
+      }
+      refreshPosition();
+      positionButton.setAttribute("aria-haspopup", "menu");
+      positionButton.setAttribute("aria-expanded", "false");
+      positionButton.addEventListener("click", () => {
+        positionMenu.hidden = !positionMenu.hidden;
+        positionButton.setAttribute("aria-expanded", String(!positionMenu.hidden));
+      });
+      positionControl.addEventListener("pointerdown", (event) => event.stopPropagation());
+      positionControl.addEventListener("focusout", () => {
+        window.setTimeout(() => {
+          if (!positionControl.contains(document.activeElement)) {
+            positionMenu.hidden = true;
+            positionButton.setAttribute("aria-expanded", "false");
+          }
+        }, 0);
+      });
+      const copy = preview.createDiv({ cls: "footprint-studio-photo-copy" });
+      const copyPreview = copy.createEl("button", {
+        cls: "footprint-studio-photo-copy-preview",
+        attr: {
+          type: "button",
+          "aria-label": "\u7F16\u8F91\u7167\u7247\u6587\u5B57",
+          "aria-haspopup": "dialog",
+          "aria-expanded": "false"
+        }
+      });
+      const altText = copyPreview.createSpan({
+        cls: "footprint-studio-photo-alt-text"
+      });
+      const captionText = copyPreview.createSpan({
+        cls: "footprint-studio-photo-caption-text"
+      });
+      const metadataText = copyPreview.createSpan({
+        cls: "footprint-studio-photo-exif"
+      });
+      const capturedAtText = metadataText.createSpan();
+      const coordinatesText = metadataText.createSpan();
+      const editor = copy.createDiv({ cls: "footprint-studio-photo-editor" });
+      editor.hidden = true;
+      const alt = this.createCompactInput(editor, "\u66FF\u4EE3\u6587\u672C", photo.alt);
+      const caption = this.createCompactInput(editor, "\u56FE\u7247\u8BF4\u660E\uFF08\u53EF\u9009\uFF09", photo.caption);
+      const refreshCopy = () => {
+        altText.textContent = photo.alt.trim() || "\u6DFB\u52A0\u66FF\u4EE3\u6587\u672C";
+        captionText.textContent = photo.caption.trim();
+        captionText.hidden = !photo.caption.trim();
+        capturedAtText.textContent = photo.capturedAt ? photo.capturedAt.replace("T", " ") : "";
+        capturedAtText.hidden = !photo.capturedAt;
+        coordinatesText.textContent = photo.coordinates ? `${photo.coordinates.lat.toFixed(5)}, ${photo.coordinates.lng.toFixed(5)}` : "";
+        coordinatesText.hidden = !photo.coordinates;
+        metadataText.hidden = !photo.metadataPending && !photo.capturedAt && !photo.coordinates;
+        if (photo.metadataPending) {
+          capturedAtText.textContent = "\u6B63\u5728\u8BFB\u53D6\u62CD\u6444\u4FE1\u606F\u2026";
+          capturedAtText.hidden = false;
+          coordinatesText.hidden = true;
+        }
+      };
+      alt.addEventListener("input", () => {
+        photo.alt = alt.value;
+        refreshCopy();
+      });
+      caption.addEventListener("input", () => {
+        photo.caption = caption.value;
+        refreshCopy();
+      });
+      refreshCopy();
+      copyPreview.addEventListener("click", () => {
+        editor.hidden = !editor.hidden;
+        copyPreview.setAttribute("aria-expanded", String(!editor.hidden));
+        if (!editor.hidden) alt.focus();
+      });
+      copy.addEventListener("pointerdown", (event) => event.stopPropagation());
+      copy.addEventListener("keydown", (event) => {
+        if (event.key !== "Escape") return;
+        editor.hidden = true;
+        copyPreview.setAttribute("aria-expanded", "false");
+        copyPreview.focus();
+      });
+      copy.addEventListener("focusout", () => {
+        window.setTimeout(() => {
+          if (!copy.contains(document.activeElement)) {
+            editor.hidden = true;
+            copyPreview.setAttribute("aria-expanded", "false");
+          }
+        }, 0);
+      });
     });
   }
   createCompactInput(parent, placeholder, value) {
@@ -34629,14 +35480,37 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       if (photo.file && photo.previewUrl.startsWith("blob:")) URL.revokeObjectURL(photo.previewUrl);
     }
   }
-  loadBlogPosts() {
+  async loadBlogPosts() {
     const prefix = `${(0, import_obsidian.normalizePath)(this.plugin.settings.blogFolder)}/`;
-    return this.app.vault.getMarkdownFiles().filter((file) => file.path.startsWith(prefix)).map((file) => {
-      const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-      const slug = String(frontmatter?.slug ?? "").trim() || file.basename;
-      const title = String(frontmatter?.title ?? "").trim() || file.basename;
-      return { id: slug, title, path: file.path };
-    }).sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
+    const files = this.app.vault.getFiles().filter((file) => {
+      const extension = file.extension.toLowerCase();
+      return file.path.startsWith(prefix) && (extension === "md" || extension === "mdx");
+    });
+    const posts = await Promise.all(
+      files.map(async (file) => {
+        let frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        if (!frontmatter) {
+          try {
+            const source = await this.app.vault.cachedRead(file);
+            const match = source.match(
+              /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
+            );
+            const parsed = match ? (0, import_obsidian.parseYaml)(match[1]) : null;
+            if (parsed && typeof parsed === "object") {
+              frontmatter = parsed;
+            }
+          } catch (error) {
+            console.warn(`Footprint Studio \u65E0\u6CD5\u89E3\u6790\u6587\u7AE0 frontmatter\uFF1A${file.path}`, error);
+          }
+        }
+        const slug = String(frontmatter?.slug ?? "").trim() || file.basename;
+        const title = String(frontmatter?.title ?? "").trim() || file.basename;
+        const rawKeywords = frontmatter?.keywords;
+        const keywords = (Array.isArray(rawKeywords) ? rawKeywords : rawKeywords == null ? [] : [rawKeywords]).map((value) => String(value).trim()).filter(Boolean);
+        return { id: slug, title, path: file.path, keywords };
+      })
+    );
+    return posts.sort((a, b) => a.title.localeCompare(b.title, "zh-CN"));
   }
   renderSelectedPosts() {
     if (!this.selectedPostsEl) return;
@@ -34657,13 +35531,14 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   renderPostSuggestions() {
     if (!this.postsEl || !this.postSearchInput) return;
     this.postsEl.empty();
-    const query = this.postSearchInput.value.trim().toLocaleLowerCase("zh-CN");
-    if (!query) {
+    const query = this.postSearchInput.value.trim();
+    const normalizedQuery = normalizeSearchText(query);
+    if (!normalizedQuery) {
       this.postsEl.hidden = true;
       return;
     }
     const posts = this.blogPosts.filter(
-      (post) => !this.selectedPosts.has(post.id) && `${post.title} ${post.id}`.toLocaleLowerCase("zh-CN").includes(query)
+      (post) => !this.selectedPosts.has(post.id) && `${post.title} ${post.id} ${post.keywords.join(" ")}`.toLocaleLowerCase("zh-CN").includes(normalizedQuery)
     ).slice(0, 8);
     if (!posts.length) {
       this.postsEl.createDiv({
@@ -34678,9 +35553,31 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
         cls: "footprint-studio-post",
         attr: { type: "button" }
       });
-      const text = button.createDiv();
-      text.createEl("strong", { text: post.title });
-      text.createEl("span", { text: post.id });
+      const text = button.createDiv({ cls: "footprint-studio-post-copy" });
+      const title = text.createEl("strong", {
+        cls: "footprint-studio-post-title"
+      });
+      appendHighlightedText(title, post.title, normalizedQuery);
+      const slug = text.createEl("span", {
+        cls: "footprint-studio-post-slug"
+      });
+      appendHighlightedText(slug, post.id, normalizedQuery);
+      const matchingKeywords = post.keywords.filter(
+        (keyword) => normalizeSearchText(keyword).includes(normalizedQuery)
+      );
+      if (matchingKeywords.length) {
+        const keywords = text.createDiv({ cls: "footprint-studio-post-keywords" });
+        keywords.createSpan({
+          cls: "footprint-studio-post-keywords-label",
+          text: "\u5173\u952E\u8BCD"
+        });
+        for (const keyword of matchingKeywords) {
+          const keywordEl = keywords.createSpan({
+            cls: "footprint-studio-post-keyword"
+          });
+          appendHighlightedText(keywordEl, keyword, normalizedQuery);
+        }
+      }
       button.addEventListener("mousedown", (event) => event.preventDefault());
       button.addEventListener("click", () => {
         this.selectedPosts.add(post.id);
@@ -34714,6 +35611,10 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     }
     if (!this.photos.length) {
       new import_obsidian.Notice("\u8BF7\u81F3\u5C11\u9009\u62E9\u4E00\u5F20\u7167\u7247");
+      return;
+    }
+    if (!this.photos.some((photo) => !photo.hidden)) {
+      new import_obsidian.Notice("\u8BF7\u81F3\u5C11\u4FDD\u7559\u4E00\u5F20\u5728\u7F51\u7AD9\u5C55\u793A\u7684\u7167\u7247");
       return;
     }
     this.saving = true;
@@ -34765,11 +35666,14 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
         savedFile = await this.app.vault.create(markdownPath, markdown);
       }
       this.currentFile = savedFile;
+      this.savedCoordinates = { lat: values.lat, lng: values.lng };
+      this.updateResetMapButton();
       this.refreshTitle();
       this.fields.fileName.value = savedFile.basename;
       this.fields.fileName.disabled = false;
       this.fileNameButton.disabled = false;
       this.renderPhotos();
+      this.app.workspace.requestSaveLayout();
       new import_obsidian.Notice(`\u8DB3\u8FF9\u5DF2\u4FDD\u5B58\uFF1A${savedFile.path}`);
     } catch (error) {
       console.error("Footprint Studio save failed", error);
@@ -34784,6 +35688,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     return {
       fileName: this.fields.fileName.value.trim(),
       visitedAt: this.fields.visitedAt.value,
+      capturedTime: this.fields.capturedTime.value,
       country: this.fields.country.value.trim(),
       region: this.fields.region.value.trim(),
       city: this.fields.city.value.trim(),
@@ -34799,11 +35704,18 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   buildMarkdown(values, markdownPath) {
     const lines = [
       "---",
-      `visitedAt: ${values.visitedAt}`,
+      `visitedAt: ${values.visitedAt}`
+    ];
+    if (values.capturedTime) {
+      lines.push(
+        `capturedAt: ${yamlString(`${values.visitedAt}T${values.capturedTime}`)}`
+      );
+    }
+    lines.push(
       `country: ${yamlString(values.country)}`,
       `region: ${yamlString(values.region)}`,
       `city: ${yamlString(values.city)}`
-    ];
+    );
     if (values.district) lines.push(`district: ${yamlString(values.district)}`);
     if (values.town) lines.push(`town: ${yamlString(values.town)}`);
     if (values.street) lines.push(`street: ${yamlString(values.street)}`);
@@ -34826,6 +35738,13 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       lines.push(`    alt: ${yamlString(alt)}`);
       if (photo.caption.trim()) lines.push(`    caption: ${yamlString(photo.caption.trim())}`);
       if (photo.position.trim()) lines.push(`    position: ${yamlString(photo.position.trim())}`);
+      if (photo.hidden) lines.push("    hidden: true");
+      if (photo.capturedAt) lines.push(`    capturedAt: ${yamlString(photo.capturedAt)}`);
+      if (photo.coordinates) {
+        lines.push("    coordinates:");
+        lines.push(`      lat: ${photo.coordinates.lat}`);
+        lines.push(`      lng: ${photo.coordinates.lng}`);
+      }
     }
     lines.push("---", "", values.description, "");
     return lines.join("\n");
@@ -34887,6 +35806,13 @@ var FootprintStudioSettingTab = class extends import_obsidian.PluginSettingTab {
           this.plugin.settings.defaultLng = number;
           await this.plugin.saveSettings();
         }
+      })
+    );
+    new import_obsidian.Setting(containerEl).setName("\u5730\u56FE\u9AD8\u5EA6").setDesc("\u8DB3\u8FF9\u7F16\u8F91\u5668\u4E2D\u7684\u5730\u56FE\u9AD8\u5EA6\uFF0C\u7A84\u5C4F\u4F1A\u81EA\u52A8\u9650\u5236\u5728\u53EF\u89C6\u533A\u57DF\u5185\u3002").addSlider(
+      (slider) => slider.setLimits(MAP_HEIGHT_MIN, MAP_HEIGHT_MAX, 20).setDynamicTooltip().setValue(this.plugin.settings.mapHeight).onChange(async (value) => {
+        this.plugin.settings.mapHeight = normalizeMapHeight(value);
+        this.plugin.refreshMapHeights();
+        await this.plugin.saveSettings();
       })
     );
     new import_obsidian.Setting(containerEl).setName("\u9ED8\u8BA4\u7F29\u653E\u7EA7\u522B").setDesc("\u5EFA\u8BAE\u4F7F\u7528 3\u201312\u3002").addSlider(
