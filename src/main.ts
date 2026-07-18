@@ -1634,6 +1634,7 @@ class FootprintStudioView extends ItemView {
   private resetMapButton: HTMLAnchorElement | null = null;
   private currentFile: TFile | null = null;
   private photos: PhotoDraft[] = [];
+  private pendingPhotoDeletes = new Set<string>();
   private blogPosts: BlogPostOption[] = [];
   private selectedPosts = new Set<string>();
   private readonly instanceId = Math.random().toString(36).slice(2);
@@ -2151,6 +2152,7 @@ class FootprintStudioView extends ItemView {
     this.refreshTitle();
     this.disposePhotos();
     this.photos = [];
+    this.pendingPhotoDeletes.clear();
     this.selectedPosts.clear();
     if (!this.fields.visitedAt) return;
 
@@ -2608,7 +2610,8 @@ class FootprintStudioView extends ItemView {
       down.disabled = index === this.photos.length - 1;
       down.addEventListener("click", () => this.movePhoto(index, index + 1));
       const remove = makeButton(cardActions, "", "trash-2");
-      remove.setAttribute("aria-label", "移除照片");
+      remove.setAttribute("aria-label", "删除照片和文件");
+      remove.setAttribute("title", "删除照片和文件");
       remove.addEventListener("click", () => this.removePhoto(index));
 
       const positionControl = preview.createDiv({
@@ -2806,8 +2809,44 @@ class FootprintStudioView extends ItemView {
 
   private removePhoto(index: number): void {
     const [photo] = this.photos.splice(index, 1);
+    const linkedFile = photo ? this.resolvePhotoFile(photo) : null;
+    if (
+      linkedFile &&
+      this.isManagedPhotoFile(linkedFile) &&
+      !this.photos.some(item => this.resolvePhotoFile(item)?.path === linkedFile.path)
+    ) {
+      this.pendingPhotoDeletes.add(linkedFile.path);
+      new Notice("照片将在保存足迹后移入回收站");
+    } else if (linkedFile && !this.isManagedPhotoFile(linkedFile)) {
+      new Notice("已移除照片引用；外部图片文件不会被删除");
+    }
     if (photo?.file && photo.previewUrl.startsWith("blob:")) URL.revokeObjectURL(photo.previewUrl);
     this.renderPhotos();
+  }
+
+  private resolvePhotoFile(photo: PhotoDraft): TFile | null {
+    if (!photo.source || !this.currentFile) return null;
+    const linked = this.app.metadataCache.getFirstLinkpathDest(
+      photo.source,
+      this.currentFile.path
+    );
+    return linked instanceof TFile ? linked : null;
+  }
+
+  private isManagedPhotoFile(file: TFile): boolean {
+    const folder = normalizePath(this.plugin.settings.attachmentsFolder).replace(
+      /\/+$/,
+      ""
+    );
+    return Boolean(folder) && file.path.startsWith(`${folder}/`);
+  }
+
+  private async trashPendingPhotoFiles(): Promise<void> {
+    for (const path of [...this.pendingPhotoDeletes]) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof TFile) await this.app.fileManager.trashFile(file);
+      this.pendingPhotoDeletes.delete(path);
+    }
   }
 
   private disposePhotos(): void {
@@ -2993,6 +3032,7 @@ class FootprintStudioView extends ItemView {
       }
 
       const assetFolder = normalizePath(`${this.plugin.settings.attachmentsFolder}/${fileName}`);
+      await this.trashPendingPhotoFiles();
       const savedPhotos: PhotoDraft[] = [];
       for (const photo of this.photos) {
         if (!photo.file) {

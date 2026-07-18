@@ -37000,6 +37000,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.resetMapButton = null;
     this.currentFile = null;
     this.photos = [];
+    this.pendingPhotoDeletes = /* @__PURE__ */ new Set();
     this.blogPosts = [];
     this.selectedPosts = /* @__PURE__ */ new Set();
     this.instanceId = Math.random().toString(36).slice(2);
@@ -37448,6 +37449,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     this.refreshTitle();
     this.disposePhotos();
     this.photos = [];
+    this.pendingPhotoDeletes.clear();
     this.selectedPosts.clear();
     if (!this.fields.visitedAt) return;
     for (const field of Object.values(this.fields)) field.value = "";
@@ -37851,7 +37853,8 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       down.disabled = index === this.photos.length - 1;
       down.addEventListener("click", () => this.movePhoto(index, index + 1));
       const remove = makeButton(cardActions, "", "trash-2");
-      remove.setAttribute("aria-label", "\u79FB\u9664\u7167\u7247");
+      remove.setAttribute("aria-label", "\u5220\u9664\u7167\u7247\u548C\u6587\u4EF6");
+      remove.setAttribute("title", "\u5220\u9664\u7167\u7247\u548C\u6587\u4EF6");
       remove.addEventListener("click", () => this.removePhoto(index));
       const positionControl = preview.createDiv({
         cls: "footprint-studio-photo-position-control"
@@ -38034,8 +38037,37 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   }
   removePhoto(index) {
     const [photo] = this.photos.splice(index, 1);
+    const linkedFile = photo ? this.resolvePhotoFile(photo) : null;
+    if (linkedFile && this.isManagedPhotoFile(linkedFile) && !this.photos.some((item) => this.resolvePhotoFile(item)?.path === linkedFile.path)) {
+      this.pendingPhotoDeletes.add(linkedFile.path);
+      new import_obsidian.Notice("\u7167\u7247\u5C06\u5728\u4FDD\u5B58\u8DB3\u8FF9\u540E\u79FB\u5165\u56DE\u6536\u7AD9");
+    } else if (linkedFile && !this.isManagedPhotoFile(linkedFile)) {
+      new import_obsidian.Notice("\u5DF2\u79FB\u9664\u7167\u7247\u5F15\u7528\uFF1B\u5916\u90E8\u56FE\u7247\u6587\u4EF6\u4E0D\u4F1A\u88AB\u5220\u9664");
+    }
     if (photo?.file && photo.previewUrl.startsWith("blob:")) URL.revokeObjectURL(photo.previewUrl);
     this.renderPhotos();
+  }
+  resolvePhotoFile(photo) {
+    if (!photo.source || !this.currentFile) return null;
+    const linked = this.app.metadataCache.getFirstLinkpathDest(
+      photo.source,
+      this.currentFile.path
+    );
+    return linked instanceof import_obsidian.TFile ? linked : null;
+  }
+  isManagedPhotoFile(file) {
+    const folder = (0, import_obsidian.normalizePath)(this.plugin.settings.attachmentsFolder).replace(
+      /\/+$/,
+      ""
+    );
+    return Boolean(folder) && file.path.startsWith(`${folder}/`);
+  }
+  async trashPendingPhotoFiles() {
+    for (const path of [...this.pendingPhotoDeletes]) {
+      const file = this.app.vault.getAbstractFileByPath(path);
+      if (file instanceof import_obsidian.TFile) await this.app.fileManager.trashFile(file);
+      this.pendingPhotoDeletes.delete(path);
+    }
   }
   disposePhotos() {
     for (const photo of this.photos) {
@@ -38194,6 +38226,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
         return;
       }
       const assetFolder = (0, import_obsidian.normalizePath)(`${this.plugin.settings.attachmentsFolder}/${fileName}`);
+      await this.trashPendingPhotoFiles();
       const savedPhotos = [];
       for (const photo of this.photos) {
         if (!photo.file) {
