@@ -714,6 +714,45 @@ export default class FootprintStudioPlugin extends Plugin {
     });
 
     this.addCommand({
+      id: "save-current-footprint",
+      name: "保存当前足迹",
+      hotkeys: [{ modifiers: ["Mod"], key: "s" }],
+      checkCallback: checking => {
+        const view = this.app.workspace.getActiveViewOfType(FootprintStudioView);
+        if (!view) return false;
+        if (!checking) view.requestSave();
+        return true;
+      },
+    });
+
+    this.registerNativeSaveShortcut();
+
+    // Obsidian's own editor handles Mod+S before a custom view can receive it.
+    // Capture the keystroke at the document level so saving also works while an
+    // input, textarea, map, or photo control inside Footprint Studio has focus.
+    this.registerDomEvent(
+      document,
+      "keydown",
+      event => {
+        if (
+          event.isComposing ||
+          event.altKey ||
+          event.shiftKey ||
+          (!event.metaKey && !event.ctrlKey) ||
+          event.key.toLowerCase() !== "s"
+        ) {
+          return;
+        }
+        const view = this.app.workspace.getActiveViewOfType(FootprintStudioView);
+        if (!view) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        view.requestSave();
+      },
+      { capture: true }
+    );
+
+    this.addCommand({
       id: "edit-current-footprint",
       name: "编辑当前足迹",
       checkCallback: checking => {
@@ -744,6 +783,63 @@ export default class FootprintStudioPlugin extends Plugin {
     );
 
     this.addSettingTab(new FootprintStudioSettingTab(this.app, this));
+  }
+
+  private registerNativeSaveShortcut(): void {
+    type NativeInput = {
+      type: string;
+      key: string;
+      meta: boolean;
+      control: boolean;
+      alt: boolean;
+      shift: boolean;
+    };
+    type NativeInputEvent = { preventDefault: () => void };
+    type NativeWebContents = {
+      on: (
+        event: "before-input-event",
+        listener: (event: NativeInputEvent, input: NativeInput) => void
+      ) => void;
+      removeListener: (
+        event: "before-input-event",
+        listener: (event: NativeInputEvent, input: NativeInput) => void
+      ) => void;
+    };
+    type ElectronRuntime = {
+      remote?: { getCurrentWebContents?: () => NativeWebContents };
+    };
+
+    try {
+      // Obsidian exposes Electron's require in the plugin's CommonJS scope,
+      // but not reliably on globalThis while plugins are loading.
+      const runtimeRequire = eval("require") as (moduleId: string) => unknown;
+      const electron = runtimeRequire("electron") as ElectronRuntime;
+      const webContents = electron.remote?.getCurrentWebContents?.();
+      if (!webContents) return;
+
+      const listener = (event: NativeInputEvent, input: NativeInput): void => {
+        if (
+          input.type !== "keyDown" ||
+          input.alt ||
+          input.shift ||
+          (!input.meta && !input.control) ||
+          input.key.toLowerCase() !== "s"
+        ) {
+          return;
+        }
+        const view = this.app.workspace.getActiveViewOfType(FootprintStudioView);
+        if (!view) return;
+        event.preventDefault();
+        view.requestSave();
+      };
+
+      webContents.on("before-input-event", listener);
+      this.register(() =>
+        webContents.removeListener("before-input-event", listener)
+      );
+    } catch (error) {
+      console.warn("Footprint Studio 无法注册原生保存快捷键", error);
+    }
   }
 
   async onunload(): Promise<void> {
@@ -1645,6 +1741,7 @@ class FootprintStudioView extends ItemView {
   private selectedPostsEl!: HTMLElement;
   private postSearchInput!: HTMLInputElement;
   private fileNameButton!: HTMLButtonElement;
+  private saveButton!: HTMLButtonElement;
   private headingTitleEl!: HTMLHeadingElement;
   private searchResultsEl!: HTMLElement;
   private saving = false;
@@ -1669,6 +1766,10 @@ class FootprintStudioView extends ItemView {
 
   getEditingPath(): string | null {
     return this.currentFile?.path ?? null;
+  }
+
+  requestSave(): void {
+    if (this.saveButton) void this.saveFootprint(this.saveButton);
   }
 
   getState(): Record<string, unknown> {
@@ -1805,8 +1906,10 @@ class FootprintStudioView extends ItemView {
     const actions = header.createDiv({ cls: "footprint-studio-header-actions" });
     const resetButton = makeButton(actions, "新建足迹", "file-plus-2");
     resetButton.addEventListener("click", () => void this.plugin.openStudio());
-    const saveButton = makeButton(actions, "保存足迹", "save", "mod-cta");
-    saveButton.addEventListener("click", () => void this.saveFootprint(saveButton));
+    this.saveButton = makeButton(actions, "保存足迹", "save", "mod-cta");
+    this.saveButton.setAttribute("title", "保存足迹（⌘S / Ctrl+S）");
+    this.saveButton.setAttribute("aria-keyshortcuts", "Meta+S Control+S");
+    this.saveButton.addEventListener("click", () => this.requestSave());
 
     const workspace = this.contentEl.createDiv({ cls: "footprint-studio-workspace" });
     const photoPanel = workspace.createDiv({

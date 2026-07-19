@@ -381,9 +381,9 @@ var require_leaflet_src = __commonJS({
           }
           var index2 = this._listens(type, fn, context);
           if (index2 !== false) {
-            var listener = listeners[index2];
+            var listener2 = listeners[index2];
             if (this._firingCount) {
-              listener.fn = falseFn;
+              listener2.fn = falseFn;
               this._events[type] = listeners = listeners.slice();
             }
             listeners.splice(index2, 1);
@@ -36258,6 +36258,33 @@ var FootprintStudioPlugin = class extends import_obsidian.Plugin {
       callback: () => this.openStudio()
     });
     this.addCommand({
+      id: "save-current-footprint",
+      name: "\u4FDD\u5B58\u5F53\u524D\u8DB3\u8FF9",
+      hotkeys: [{ modifiers: ["Mod"], key: "s" }],
+      checkCallback: (checking) => {
+        const view = this.app.workspace.getActiveViewOfType(FootprintStudioView);
+        if (!view) return false;
+        if (!checking) view.requestSave();
+        return true;
+      }
+    });
+    this.registerNativeSaveShortcut();
+    this.registerDomEvent(
+      document,
+      "keydown",
+      (event) => {
+        if (event.isComposing || event.altKey || event.shiftKey || !event.metaKey && !event.ctrlKey || event.key.toLowerCase() !== "s") {
+          return;
+        }
+        const view = this.app.workspace.getActiveViewOfType(FootprintStudioView);
+        if (!view) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        view.requestSave();
+      },
+      { capture: true }
+    );
+    this.addCommand({
       id: "edit-current-footprint",
       name: "\u7F16\u8F91\u5F53\u524D\u8DB3\u8FF9",
       checkCallback: (checking) => {
@@ -36280,6 +36307,29 @@ var FootprintStudioPlugin = class extends import_obsidian.Plugin {
       })
     );
     this.addSettingTab(new FootprintStudioSettingTab(this.app, this));
+  }
+  registerNativeSaveShortcut() {
+    try {
+      const runtimeRequire = eval("require");
+      const electron = runtimeRequire("electron");
+      const webContents = electron.remote?.getCurrentWebContents?.();
+      if (!webContents) return;
+      const listener = (event, input) => {
+        if (input.type !== "keyDown" || input.alt || input.shift || !input.meta && !input.control || input.key.toLowerCase() !== "s") {
+          return;
+        }
+        const view = this.app.workspace.getActiveViewOfType(FootprintStudioView);
+        if (!view) return;
+        event.preventDefault();
+        view.requestSave();
+      };
+      webContents.on("before-input-event", listener);
+      this.register(
+        () => webContents.removeListener("before-input-event", listener)
+      );
+    } catch (error) {
+      console.warn("Footprint Studio \u65E0\u6CD5\u6CE8\u518C\u539F\u751F\u4FDD\u5B58\u5FEB\u6377\u952E", error);
+    }
   }
   async onunload() {
     await Promise.all(
@@ -37021,6 +37071,9 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
   getEditingPath() {
     return this.currentFile?.path ?? null;
   }
+  requestSave() {
+    if (this.saveButton) void this.saveFootprint(this.saveButton);
+  }
   getState() {
     return { filePath: this.currentFile?.path ?? null };
   }
@@ -37132,8 +37185,10 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     const actions = header.createDiv({ cls: "footprint-studio-header-actions" });
     const resetButton = makeButton(actions, "\u65B0\u5EFA\u8DB3\u8FF9", "file-plus-2");
     resetButton.addEventListener("click", () => void this.plugin.openStudio());
-    const saveButton = makeButton(actions, "\u4FDD\u5B58\u8DB3\u8FF9", "save", "mod-cta");
-    saveButton.addEventListener("click", () => void this.saveFootprint(saveButton));
+    this.saveButton = makeButton(actions, "\u4FDD\u5B58\u8DB3\u8FF9", "save", "mod-cta");
+    this.saveButton.setAttribute("title", "\u4FDD\u5B58\u8DB3\u8FF9\uFF08\u2318S / Ctrl+S\uFF09");
+    this.saveButton.setAttribute("aria-keyshortcuts", "Meta+S Control+S");
+    this.saveButton.addEventListener("click", () => this.requestSave());
     const workspace = this.contentEl.createDiv({ cls: "footprint-studio-workspace" });
     const photoPanel = workspace.createDiv({
       cls: "footprint-studio-form footprint-studio-photo-panel"
