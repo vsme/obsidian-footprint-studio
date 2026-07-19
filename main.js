@@ -38063,10 +38063,24 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
     return Boolean(folder) && file.path.startsWith(`${folder}/`);
   }
   async trashPendingPhotoFiles() {
+    const parentFolders = /* @__PURE__ */ new Set();
     for (const path of [...this.pendingPhotoDeletes]) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof import_obsidian.TFile) await this.app.fileManager.trashFile(file);
+      if (file instanceof import_obsidian.TFile) {
+        if (file.parent?.path) parentFolders.add(file.parent.path);
+        await this.app.fileManager.trashFile(file);
+      }
       this.pendingPhotoDeletes.delete(path);
+    }
+    const attachmentsRoot = (0, import_obsidian.normalizePath)(
+      this.plugin.settings.attachmentsFolder
+    );
+    for (const folderPath of parentFolders) {
+      if (folderPath === attachmentsRoot) continue;
+      const folder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (folder instanceof import_obsidian.TFolder && folder.children.length === 0) {
+        await this.app.fileManager.trashFile(folder);
+      }
     }
   }
   disposePhotos() {
@@ -38227,6 +38241,7 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       }
       const assetFolder = (0, import_obsidian.normalizePath)(`${this.plugin.settings.attachmentsFolder}/${fileName}`);
       await this.trashPendingPhotoFiles();
+      await this.rehomeSavedPhotos(markdownPath, assetFolder);
       const savedPhotos = [];
       for (const photo of this.photos) {
         if (!photo.file) {
@@ -38358,6 +38373,59 @@ var FootprintStudioView = class extends import_obsidian.ItemView {
       const existing = this.app.vault.getAbstractFileByPath(current);
       if (!existing) await this.app.vault.createFolder(current);
       else if (!(existing instanceof import_obsidian.TFolder)) throw new Error(`${current} \u4E0D\u662F\u6587\u4EF6\u5939`);
+    }
+  }
+  async rehomeSavedPhotos(markdownPath, assetFolder) {
+    const entries = this.photos.filter((photo) => !photo.file).map((photo) => {
+      const file = this.resolvePhotoFile(photo);
+      return file && this.isManagedPhotoFile(file) ? { photo, file, originalPath: file.path } : null;
+    }).filter(
+      (entry) => Boolean(entry)
+    );
+    if (!entries.length) return;
+    const sourceFolders = new Set(
+      entries.map((entry) => entry.file.parent?.path ?? "").filter(Boolean)
+    );
+    const targetExists = this.app.vault.getAbstractFileByPath(assetFolder);
+    if (sourceFolders.size === 1 && !targetExists) {
+      const [sourceFolderPath] = sourceFolders;
+      const sourceFolder = this.app.vault.getAbstractFileByPath(sourceFolderPath);
+      if (sourceFolder instanceof import_obsidian.TFolder && sourceFolder.path !== assetFolder && sourceFolder.path !== (0, import_obsidian.normalizePath)(this.plugin.settings.attachmentsFolder)) {
+        await this.app.vault.rename(sourceFolder, assetFolder);
+        for (const entry of entries) {
+          const movedPath = (0, import_obsidian.normalizePath)(
+            `${assetFolder}${entry.originalPath.slice(sourceFolderPath.length)}`
+          );
+          const movedFile = this.app.vault.getAbstractFileByPath(movedPath);
+          entry.photo.source = relativePath(markdownPath, movedPath);
+          entry.photo.previewUrl = movedFile instanceof import_obsidian.TFile ? this.app.vault.getResourcePath(movedFile) : entry.photo.previewUrl;
+        }
+        return;
+      }
+    }
+    await this.ensureFolder(assetFolder);
+    const previousFolders = /* @__PURE__ */ new Set();
+    for (const entry of entries) {
+      const parentPath = entry.file.parent?.path;
+      if (parentPath) previousFolders.add(parentPath);
+      let movedFile = entry.file;
+      if (parentPath !== assetFolder) {
+        const target = this.uniqueFilePath(assetFolder, entry.file.name);
+        await this.app.vault.rename(entry.file, target);
+        const resolved = this.app.vault.getAbstractFileByPath(target);
+        if (resolved instanceof import_obsidian.TFile) movedFile = resolved;
+      }
+      entry.photo.source = relativePath(markdownPath, movedFile.path);
+      entry.photo.previewUrl = this.app.vault.getResourcePath(movedFile);
+    }
+    for (const folderPath of previousFolders) {
+      if (folderPath === assetFolder || folderPath === (0, import_obsidian.normalizePath)(this.plugin.settings.attachmentsFolder)) {
+        continue;
+      }
+      const folder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (folder instanceof import_obsidian.TFolder && folder.children.length === 0) {
+        await this.app.fileManager.trashFile(folder);
+      }
     }
   }
   uniqueFilePath(folder, originalName) {

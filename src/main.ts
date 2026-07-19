@@ -2842,10 +2842,24 @@ class FootprintStudioView extends ItemView {
   }
 
   private async trashPendingPhotoFiles(): Promise<void> {
+    const parentFolders = new Set<string>();
     for (const path of [...this.pendingPhotoDeletes]) {
       const file = this.app.vault.getAbstractFileByPath(path);
-      if (file instanceof TFile) await this.app.fileManager.trashFile(file);
+      if (file instanceof TFile) {
+        if (file.parent?.path) parentFolders.add(file.parent.path);
+        await this.app.fileManager.trashFile(file);
+      }
       this.pendingPhotoDeletes.delete(path);
+    }
+    const attachmentsRoot = normalizePath(
+      this.plugin.settings.attachmentsFolder
+    );
+    for (const folderPath of parentFolders) {
+      if (folderPath === attachmentsRoot) continue;
+      const folder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (folder instanceof TFolder && folder.children.length === 0) {
+        await this.app.fileManager.trashFile(folder);
+      }
     }
   }
 
@@ -3033,6 +3047,7 @@ class FootprintStudioView extends ItemView {
 
       const assetFolder = normalizePath(`${this.plugin.settings.attachmentsFolder}/${fileName}`);
       await this.trashPendingPhotoFiles();
+      await this.rehomeSavedPhotos(markdownPath, assetFolder);
       const savedPhotos: PhotoDraft[] = [];
       for (const photo of this.photos) {
         if (!photo.file) {
@@ -3184,6 +3199,92 @@ class FootprintStudioView extends ItemView {
       const existing = this.app.vault.getAbstractFileByPath(current);
       if (!existing) await this.app.vault.createFolder(current);
       else if (!(existing instanceof TFolder)) throw new Error(`${current} 不是文件夹`);
+    }
+  }
+
+  private async rehomeSavedPhotos(
+    markdownPath: string,
+    assetFolder: string
+  ): Promise<void> {
+    const entries = this.photos
+      .filter(photo => !photo.file)
+      .map(photo => {
+        const file = this.resolvePhotoFile(photo);
+        return file && this.isManagedPhotoFile(file)
+          ? { photo, file, originalPath: file.path }
+          : null;
+      })
+      .filter(
+        (
+          entry
+        ): entry is { photo: PhotoDraft; file: TFile; originalPath: string } =>
+          Boolean(entry)
+      );
+    if (!entries.length) return;
+
+    const sourceFolders = new Set(
+      entries
+        .map(entry => entry.file.parent?.path ?? "")
+        .filter(Boolean)
+    );
+    const targetExists = this.app.vault.getAbstractFileByPath(assetFolder);
+
+    // The normal rename path: every saved photo lives in one per-footprint
+    // folder and the destination does not exist yet. Renaming the folder keeps
+    // any auxiliary files together and avoids unnecessary file-by-file moves.
+    if (sourceFolders.size === 1 && !targetExists) {
+      const [sourceFolderPath] = sourceFolders;
+      const sourceFolder = this.app.vault.getAbstractFileByPath(sourceFolderPath);
+      if (
+        sourceFolder instanceof TFolder &&
+        sourceFolder.path !== assetFolder &&
+        sourceFolder.path !== normalizePath(this.plugin.settings.attachmentsFolder)
+      ) {
+        await this.app.vault.rename(sourceFolder, assetFolder);
+        for (const entry of entries) {
+          const movedPath = normalizePath(
+            `${assetFolder}${entry.originalPath.slice(sourceFolderPath.length)}`
+          );
+          const movedFile = this.app.vault.getAbstractFileByPath(movedPath);
+          entry.photo.source = relativePath(markdownPath, movedPath);
+          entry.photo.previewUrl =
+            movedFile instanceof TFile
+              ? this.app.vault.getResourcePath(movedFile)
+              : entry.photo.previewUrl;
+        }
+        return;
+      }
+    }
+
+    // If a destination folder already exists (for example after an earlier
+    // partial rename), merge only the referenced photos and resolve collisions.
+    await this.ensureFolder(assetFolder);
+    const previousFolders = new Set<string>();
+    for (const entry of entries) {
+      const parentPath = entry.file.parent?.path;
+      if (parentPath) previousFolders.add(parentPath);
+      let movedFile = entry.file;
+      if (parentPath !== assetFolder) {
+        const target = this.uniqueFilePath(assetFolder, entry.file.name);
+        await this.app.vault.rename(entry.file, target);
+        const resolved = this.app.vault.getAbstractFileByPath(target);
+        if (resolved instanceof TFile) movedFile = resolved;
+      }
+      entry.photo.source = relativePath(markdownPath, movedFile.path);
+      entry.photo.previewUrl = this.app.vault.getResourcePath(movedFile);
+    }
+
+    for (const folderPath of previousFolders) {
+      if (
+        folderPath === assetFolder ||
+        folderPath === normalizePath(this.plugin.settings.attachmentsFolder)
+      ) {
+        continue;
+      }
+      const folder = this.app.vault.getAbstractFileByPath(folderPath);
+      if (folder instanceof TFolder && folder.children.length === 0) {
+        await this.app.fileManager.trashFile(folder);
+      }
     }
   }
 
