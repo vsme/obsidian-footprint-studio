@@ -1,7 +1,7 @@
 {
   "id": "footprint-studio",
   "name": "Footprint Studio",
-  "version": "0.6.4",
+  "version": "0.6.5",
   "minAppVersion": "1.7.2",
   "description": "Create and edit travel footprint notes with maps, photos, and structured metadata.",
   "author": "vsme",
