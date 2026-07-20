@@ -58,7 +58,13 @@ console.log("运行发布前构建…");
 run(npmCommand, ["run", "build"]);
 
 console.log(`升级版本：${target}`);
-run(npmCommand, ["version", target, "--message", "chore: release %s"]);
+run(npmCommand, [
+  "version",
+  target,
+  "--tag-version-prefix=",
+  "--message",
+  "chore: release %s",
+]);
 
 const packageJson = JSON.parse(readFileSync("package.json", "utf8"));
 const version = packageJson.version;
