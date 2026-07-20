@@ -1,6 +1,6 @@
 {
   "name": "obsidian-footprint-studio",
-  "version": "0.6.5",
+  "version": "0.6.6",
   "description": "Create and edit travel footprint notes with maps, photos, and structured metadata.",
   "private": true,
   "type": "module",
