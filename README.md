@@ -80,11 +80,17 @@ The build creates `main.js` locally. Compiled files are attached to GitHub relea
 
 ## Releasing
 
-1. Update `minAppVersion` in `manifest.json` if needed.
-2. Run `pnpm version patch`, `pnpm version minor`, or `pnpm version major`.
-3. Commit and push the version change.
-4. Push a tag matching the version exactly, without a `v` prefix (for example, `0.6.1`).
-5. Review and publish the draft GitHub release created by the release workflow.
+Make sure all changes have been committed on `main`, then run one of:
+
+```bash
+npm run release -- patch
+npm run release -- minor
+npm run release -- major
+```
+
+The release script checks that local `main` matches `origin/main`, runs a production build, updates `package.json`, `manifest.json`, and `versions.json`, creates the release commit and version tag, and pushes both to GitHub. The tag triggers the release workflow, which publishes the GitHub release automatically.
+
+To publish a specific version, use `npm run release -- 1.2.3`. Update `minAppVersion` in `manifest.json` and commit it before running the release command when compatibility requirements change.
 
 The release must contain `main.js`, `manifest.json`, and `styles.css`.
 
