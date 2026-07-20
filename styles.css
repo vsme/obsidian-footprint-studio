@@ -24,8 +24,8 @@
 .footprint-studio-view .leaflet-container img.leaflet-tile,
 .footprint-studio-view .leaflet-container .leaflet-marker-icon,
 .footprint-studio-view .leaflet-container .leaflet-marker-shadow {
-  max-width: none !important;
-  max-height: none !important;
+  max-width: none;
+  max-height: none;
   padding: 0;
 }
 
@@ -250,10 +250,15 @@
   --footprint-studio-gap: 16px;
   --footprint-studio-page-padding: clamp(16px, 2.5vw, 28px);
   height: 100%;
-  padding: var(--footprint-studio-page-padding);
+  padding: 0;
   overflow-y: auto;
   overflow-x: hidden;
   background: var(--background-primary);
+}
+
+.workspace-leaf-content[data-type="footprint-studio-view"]
+  > .view-content.footprint-studio-view {
+  padding: 0;
 }
 
 .footprint-studio-header {
@@ -264,22 +269,12 @@
   align-items: center;
   justify-content: space-between;
   gap: 20px;
-  max-width: 1480px;
-  margin: 0 auto 12px;
-  padding: 10px 0 12px;
+  width: 100%;
+  margin: 0 0 12px;
+  padding: 2px var(--footprint-studio-page-padding) 6px;
+  box-sizing: border-box;
   background: var(--background-primary);
   box-shadow: 0 1px 0 var(--background-modifier-border);
-}
-
-.footprint-studio-header::before {
-  position: absolute;
-  right: 0;
-  bottom: 100%;
-  left: 0;
-  height: var(--footprint-studio-page-padding);
-  background: var(--background-primary);
-  content: "";
-  pointer-events: none;
 }
 
 .footprint-studio-heading {
@@ -289,7 +284,7 @@
 .footprint-studio-heading h2 {
   margin: 0;
   overflow: hidden;
-  font-size: 1.55rem;
+  font-size: 1.25rem;
   letter-spacing: -0.025em;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -339,10 +334,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--footprint-studio-gap);
-  width: 100%;
+  width: calc(100% - var(--footprint-studio-page-padding) - var(--footprint-studio-page-padding));
   max-width: 1480px;
   min-height: 0;
-  margin: 0 auto;
+  margin: 0 auto var(--footprint-studio-page-padding);
 }
 
 .footprint-studio-map-panel,
@@ -1116,8 +1111,8 @@
   display: none;
 }
 
-.footprint-studio-photo-metadata,
-.footprint-studio-photo-position-button {
+.footprint-studio-photo-card .footprint-studio-photo-metadata,
+.footprint-studio-photo-card .footprint-studio-photo-position-button {
   --footprint-studio-photo-control-bg: rgba(20, 24, 31, 0.74);
   --footprint-studio-photo-control-hover: rgba(20, 24, 31, 0.88);
   position: absolute;
@@ -1128,14 +1123,14 @@
   padding: 0;
   align-items: center;
   justify-content: center;
-  color: rgba(255, 255, 255, 0.94) !important;
-  border: 0 !important;
-  border-radius: 7px !important;
-  background: var(--footprint-studio-photo-control-bg) !important;
-  box-shadow: none !important;
+  color: rgba(255, 255, 255, 0.94);
+  border: 0;
+  border-radius: 7px;
+  background: var(--footprint-studio-photo-control-bg);
+  box-shadow: none;
   backdrop-filter: blur(8px);
   cursor: pointer;
-  transform: none !important;
+  transform: none;
 }
 
 .footprint-studio-photo-metadata {
@@ -1143,17 +1138,19 @@
   left: 7px;
 }
 
-.footprint-studio-photo-metadata:hover,
-.footprint-studio-photo-position-button:hover,
-.footprint-studio-photo-position-button[aria-expanded="true"] {
-  color: white !important;
-  background: var(--footprint-studio-photo-control-hover) !important;
-  box-shadow: none !important;
+.footprint-studio-photo-card .footprint-studio-photo-metadata:hover,
+.footprint-studio-photo-card .footprint-studio-photo-position-button:hover,
+.footprint-studio-photo-card
+  .footprint-studio-photo-position-button[aria-expanded="true"] {
+  color: white;
+  background: var(--footprint-studio-photo-control-hover);
+  box-shadow: none;
 }
 
-.footprint-studio-photo-metadata:focus-visible,
-.footprint-studio-photo-position-button:focus-visible {
-  background: var(--footprint-studio-photo-control-hover) !important;
+.footprint-studio-photo-card .footprint-studio-photo-metadata:focus-visible,
+.footprint-studio-photo-card
+  .footprint-studio-photo-position-button:focus-visible {
+  background: var(--footprint-studio-photo-control-hover);
   outline: 1px solid rgba(255, 255, 255, 0.56);
   outline-offset: 1px;
 }
@@ -1267,11 +1264,13 @@
   pointer-events: none;
 }
 
-.footprint-studio-photo-copy > .footprint-studio-photo-copy-preview {
+.footprint-studio-photo-card
+  .footprint-studio-photo-copy
+  > .footprint-studio-photo-copy-preview {
   appearance: none;
   display: block;
   width: min(calc(100% - 81px), 260px);
-  height: auto !important;
+  height: auto;
   min-height: 0;
   margin-left: auto;
   padding: 2px 3px;
@@ -1279,9 +1278,8 @@
   color: white;
   border: 0;
   border-radius: 0;
-  background: transparent !important;
-  background-color: transparent !important;
-  box-shadow: none !important;
+  background: transparent;
+  box-shadow: none;
   font-size: var(--font-ui-smaller);
   line-height: 1.35;
   text-align: right;
@@ -1289,13 +1287,18 @@
   pointer-events: auto;
 }
 
-.footprint-studio-photo-copy > .footprint-studio-photo-copy-preview:hover,
-.footprint-studio-photo-copy > .footprint-studio-photo-copy-preview:focus,
-.footprint-studio-photo-copy > .footprint-studio-photo-copy-preview:active {
+.footprint-studio-photo-card
+  .footprint-studio-photo-copy
+  > .footprint-studio-photo-copy-preview:hover,
+.footprint-studio-photo-card
+  .footprint-studio-photo-copy
+  > .footprint-studio-photo-copy-preview:focus,
+.footprint-studio-photo-card
+  .footprint-studio-photo-copy
+  > .footprint-studio-photo-copy-preview:active {
   color: white;
-  background: transparent !important;
-  background-color: transparent !important;
-  box-shadow: none !important;
+  background: transparent;
+  box-shadow: none;
   transform: none;
 }
 
@@ -1383,7 +1386,7 @@
 
 @media (max-width: 900px) {
   .footprint-studio-view {
-    padding: 14px;
+    --footprint-studio-page-padding: 14px;
     overflow-y: auto;
   }
 

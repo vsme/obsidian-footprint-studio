@@ -1,5 +1,6 @@
 import {
   App,
+  FileView,
   ItemView,
   Modal,
   Notice,
@@ -9,6 +10,7 @@ import {
   TFile,
   TFolder,
   WorkspaceLeaf,
+  ViewStateResult,
   getFrontMatterInfo,
   normalizePath,
   parseYaml,
@@ -913,7 +915,7 @@ export default class FootprintStudioPlugin extends Plugin {
     const leaf = targetLeaf ?? this.app.workspace.getLeaf("tab");
     await leaf.setViewState({
       type: VIEW_TYPE,
-      state: { filePath: file?.path ?? null },
+      state: { file: file?.path ?? null },
       active: true,
     });
     await this.app.workspace.revealLeaf(leaf);
@@ -922,7 +924,7 @@ export default class FootprintStudioPlugin extends Plugin {
       view instanceof FootprintStudioView &&
       view.getEditingPath() !== (file?.path ?? null)
     ) {
-      await view.openFile(file ?? null);
+      await view.setState({ file: file?.path ?? null }, { history: false });
     }
   }
 
@@ -1675,7 +1677,7 @@ class FootprintOverviewView extends ItemView {
   }
 }
 
-class FootprintStudioView extends ItemView {
+class FootprintStudioView extends FileView {
   private plugin: FootprintStudioPlugin;
   private map: L.Map | null = null;
   private mapResizeObserver: ResizeObserver | null = null;
@@ -1683,7 +1685,13 @@ class FootprintStudioView extends ItemView {
   private marker: L.Marker | null = null;
   private savedCoordinates: PhotoGpsCoordinates | null = null;
   private resetMapButton: HTMLAnchorElement | null = null;
-  private currentFile: TFile | null = null;
+  private get currentFile(): TFile | null {
+    return this.file;
+  }
+
+  private set currentFile(file: TFile | null) {
+    this.file = file;
+  }
   private photos: PhotoDraft[] = [];
   private pendingPhotoDeletes = new Set<string>();
   private blogPosts: BlogPostOption[] = [];
@@ -1705,6 +1713,7 @@ class FootprintStudioView extends ItemView {
   constructor(leaf: WorkspaceLeaf, plugin: FootprintStudioPlugin) {
     super(leaf);
     this.plugin = plugin;
+    this.allowNoFile = true;
   }
 
   getViewType(): string {
@@ -1728,26 +1737,36 @@ class FootprintStudioView extends ItemView {
   }
 
   getState(): Record<string, unknown> {
-    return { filePath: this.currentFile?.path ?? null };
+    return super.getState();
   }
 
-  async setState(state: unknown): Promise<void> {
+  async setState(state: unknown, result: ViewStateResult): Promise<void> {
     const filePath =
-      state && typeof state === "object" && "filePath" in state
-        ? String((state as { filePath?: unknown }).filePath ?? "")
+      state && typeof state === "object" && ("file" in state || "filePath" in state)
+        ? String(
+            (state as { file?: unknown; filePath?: unknown }).file ??
+              (state as { filePath?: unknown }).filePath ??
+              ""
+          )
         : "";
-    if (!filePath) {
-      if (this.currentFile) await this.openFile(null);
-      return;
+    if (filePath) {
+      const file = this.app.vault.getAbstractFileByPath(filePath);
+      if (!(file instanceof TFile)) {
+        await super.setState({ file: null }, result);
+        this.resetForm();
+        new Notice(`原足迹文件不存在：${filePath}`);
+        return;
+      }
     }
-    if (this.currentFile?.path === filePath) return;
-    const file = this.app.vault.getAbstractFileByPath(filePath);
-    if (file instanceof TFile) {
-      await this.openFile(file);
-      return;
-    }
+    await super.setState({ file: filePath || null }, result);
+  }
+
+  async onLoadFile(file: TFile): Promise<void> {
+    await this.openFile(file);
+  }
+
+  async onUnloadFile(_file: TFile): Promise<void> {
     this.resetForm();
-    new Notice(`原足迹文件不存在：${filePath}`);
   }
 
   async onOpen(): Promise<void> {
@@ -1767,7 +1786,7 @@ class FootprintStudioView extends ItemView {
 
   async openFile(file: TFile | null): Promise<void> {
     if (!this.fields.visitedAt) await this.renderView();
-    this.resetForm();
+    this.resetForm(false);
     if (!file) return;
 
     const cache = this.app.metadataCache.getFileCache(file);
@@ -2197,8 +2216,8 @@ class FootprintStudioView extends ItemView {
     return input;
   }
 
-  private resetForm(): void {
-    this.currentFile = null;
+  private resetForm(clearCurrentFile = true): void {
+    if (clearCurrentFile) this.currentFile = null;
     this.savedCoordinates = null;
     this.updateResetMapButton();
     this.refreshTitle();
@@ -3255,7 +3274,8 @@ class FootprintStudioView extends ItemView {
   }
 
   private refreshTitle(): void {
-    if (this.headingTitleEl) this.headingTitleEl.textContent = this.getDisplayText();
+    const title = this.getDisplayText();
+    if (this.headingTitleEl) this.headingTitleEl.textContent = title;
     const leaf = this.leaf as WorkspaceLeaf & { updateHeader?: () => void };
     leaf.updateHeader?.();
     this.app.workspace.trigger("layout-change");
