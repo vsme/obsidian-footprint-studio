@@ -2,6 +2,10 @@
 
 在 Obsidian 内可视化创建和编辑本站的足迹 Markdown。
 
+## Demo
+
+https://github.com/user-attachments/assets/5e18d479-8beb-4297-b91f-f25a9e1601a1
+
 ## 功能
 
 - 独立“足迹总览”页面会在 Obsidian 内展示足迹目录中的全部地图点，包括草稿；草稿使用橙色特殊标记。
