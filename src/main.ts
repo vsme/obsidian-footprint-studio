@@ -9,6 +9,7 @@ import {
   TFile,
   TFolder,
   WorkspaceLeaf,
+  getFrontMatterInfo,
   normalizePath,
   parseYaml,
   requestUrl,
@@ -562,10 +563,6 @@ function dateTimeString(value: unknown): string {
   if (value == null || String(value).trim() === "") return "";
   const time = timeString(value);
   return time ? `${dateString(value)}T${time}` : "";
-}
-
-function yamlString(value: string): string {
-  return JSON.stringify(value ?? "");
 }
 
 function baseName(path: string): string {
@@ -3088,10 +3085,8 @@ class FootprintStudioView extends ItemView {
       }
       this.photos = savedPhotos;
 
-      const markdown = this.buildMarkdown(values, markdownPath);
       let savedFile: TFile;
       if (this.currentFile) {
-        await this.app.vault.modify(this.currentFile, markdown);
         if (this.currentFile.path !== markdownPath) {
           await this.app.vault.rename(this.currentFile, markdownPath);
         }
@@ -3099,8 +3094,9 @@ class FootprintStudioView extends ItemView {
         savedFile = renamedFile instanceof TFile ? renamedFile : this.currentFile;
       } else {
         await this.ensureFolder(normalizePath(this.plugin.settings.footprintsFolder));
-        savedFile = await this.app.vault.create(markdownPath, markdown);
+        savedFile = await this.app.vault.create(markdownPath, "");
       }
+      await this.writeFootprint(savedFile, values);
       this.currentFile = savedFile;
       this.savedCoordinates = { lat: values.lat, lng: values.lng };
       this.updateResetMapButton();
@@ -3153,53 +3149,71 @@ class FootprintStudioView extends ItemView {
     };
   }
 
-  private buildMarkdown(values: ReturnType<FootprintStudioView["readValues"]>, markdownPath: string): string {
-    const lines = [
-      "---",
-      `visitedAt: ${values.visitedAt}`,
-    ];
-    if (values.capturedTime) {
-      lines.push(
-        `capturedAt: ${yamlString(`${values.visitedAt}T${values.capturedTime}`)}`
+  private async writeFootprint(
+    file: TFile,
+    values: ReturnType<FootprintStudioView["readValues"]>
+  ): Promise<void> {
+    await this.app.vault.process(file, current => {
+      const frontmatter = getFrontMatterInfo(current);
+      const body = values.description.trim();
+      if (!frontmatter.exists) return body ? `${body}\n` : "";
+
+      const frontmatterBlock = current
+        .slice(0, frontmatter.contentStart)
+        .trimEnd();
+      return `${frontmatterBlock}\n\n${body}${body ? "\n" : ""}`;
+    });
+
+    await this.app.fileManager.processFrontMatter(file, frontmatter => {
+      const setOptional = (key: string, value: string): void => {
+        if (value) frontmatter[key] = value;
+        else delete frontmatter[key];
+      };
+
+      frontmatter.visitedAt = values.visitedAt;
+      setOptional(
+        "capturedAt",
+        values.capturedTime
+          ? `${values.visitedAt}T${values.capturedTime}`
+          : ""
       );
-    }
-    lines.push(
-      `country: ${yamlString(values.country)}`,
-      `region: ${yamlString(values.region)}`,
-      `city: ${yamlString(values.city)}`
-    );
-    if (values.district) lines.push(`district: ${yamlString(values.district)}`);
-    if (values.town) lines.push(`town: ${yamlString(values.town)}`);
-    if (values.street) lines.push(`street: ${yamlString(values.street)}`);
-    lines.push(
-      `place: ${yamlString(values.place)}`,
-      "coordinates:",
-      `  lat: ${values.lat}`,
-      `  lng: ${values.lng}`
-    );
-    if (this.draftInput.checked) lines.push("draft: true");
-    if (this.selectedPosts.size) {
-      lines.push("relatedPosts:");
-      for (const id of this.selectedPosts) lines.push(`  - ${yamlString(id)}`);
-    }
-    lines.push("photos:");
-    for (const photo of this.photos) {
-      if (!photo.source) continue;
-      const alt = photo.alt.trim() || values.place;
-      lines.push(`  - src: ${yamlString(photo.source)}`);
-      lines.push(`    alt: ${yamlString(alt)}`);
-      if (photo.caption.trim()) lines.push(`    caption: ${yamlString(photo.caption.trim())}`);
-      if (photo.position.trim()) lines.push(`    position: ${yamlString(photo.position.trim())}`);
-      if (photo.hidden) lines.push("    hidden: true");
-      if (photo.capturedAt) lines.push(`    capturedAt: ${yamlString(photo.capturedAt)}`);
-      if (photo.coordinates) {
-        lines.push("    coordinates:");
-        lines.push(`      lat: ${photo.coordinates.lat}`);
-        lines.push(`      lng: ${photo.coordinates.lng}`);
+      frontmatter.country = values.country;
+      frontmatter.region = values.region;
+      frontmatter.city = values.city;
+      setOptional("district", values.district);
+      setOptional("town", values.town);
+      setOptional("street", values.street);
+      frontmatter.place = values.place;
+      frontmatter.coordinates = { lat: values.lat, lng: values.lng };
+
+      if (this.draftInput.checked) frontmatter.draft = true;
+      else delete frontmatter.draft;
+
+      if (this.selectedPosts.size) {
+        frontmatter.relatedPosts = Array.from(this.selectedPosts);
+      } else {
+        delete frontmatter.relatedPosts;
       }
-    }
-    lines.push("---", "", values.description, "");
-    return lines.join("\n");
+
+      frontmatter.photos = this.photos.flatMap(photo => {
+        if (!photo.source) return [];
+        const entry: Record<string, unknown> = {
+          src: photo.source,
+          alt: photo.alt.trim() || values.place,
+        };
+        if (photo.caption.trim()) entry.caption = photo.caption.trim();
+        if (photo.position.trim()) entry.position = photo.position.trim();
+        if (photo.hidden) entry.hidden = true;
+        if (photo.capturedAt) entry.capturedAt = photo.capturedAt;
+        if (photo.coordinates) {
+          entry.coordinates = {
+            lat: photo.coordinates.lat,
+            lng: photo.coordinates.lng,
+          };
+        }
+        return [entry];
+      });
+    });
   }
 
   private refreshTitle(): void {
@@ -3331,7 +3345,6 @@ class FootprintStudioSettingTab extends PluginSettingTab {
   display(): void {
     const { containerEl } = this;
     containerEl.empty();
-    containerEl.createEl("h2", { text: "Footprint Studio 设置" });
 
     this.addTextSetting("足迹目录", "生成和识别足迹 Markdown 的 Vault 相对路径。", "footprintsFolder");
     this.addTextSetting("图片目录", "新导入图片的 Vault 相对路径。每条足迹会建立子目录。", "attachmentsFolder");
