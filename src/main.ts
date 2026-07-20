@@ -53,6 +53,12 @@ function normalizeMapHeight(value: unknown): number {
   return Math.min(MAP_HEIGHT_MAX, Math.max(MAP_HEIGHT_MIN, Math.round(height)));
 }
 
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object"
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
 function applyMapHeightClass(element: HTMLElement, value: unknown): void {
   for (let height = MAP_HEIGHT_MIN; height <= MAP_HEIGHT_MAX; height += 20) {
     element.removeClass(`footprint-studio-map-height-${height}`);
@@ -578,7 +584,7 @@ function sanitizeSegment(value: string, fallback = "footprint"): string {
   const safe = value
     .normalize("NFKC")
     .trim()
-    .replace(/[\\/:*?\"<>|#^\[\]]+/g, "-")
+    .replace(/[\\/:*?"<>|#^[\]]+/g, "-")
     .replace(/\s+/g, "-")
     .replace(/-+/g, "-")
     .replace(/^-|-$/g, "");
@@ -618,19 +624,15 @@ function makeButton(
   icon?: string,
   className?: string
 ): HTMLButtonElement {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className ?? "";
+  const button = parent.createEl("button", {
+    cls: className,
+    attr: { type: "button" },
+  });
   if (icon) {
-    const iconEl = document.createElement("span");
-    iconEl.className = "footprint-studio-button-icon";
+    const iconEl = button.createSpan({ cls: "footprint-studio-button-icon" });
     setIcon(iconEl, icon);
-    button.append(iconEl);
   }
-  const text = document.createElement("span");
-  text.textContent = label;
-  button.append(text);
-  parent.append(button);
+  button.createSpan({ text: label });
   return button;
 }
 
@@ -672,7 +674,39 @@ export default class FootprintStudioPlugin extends Plugin {
   private nativeMarkdownLeaves = new WeakMap<WorkspaceLeaf, string>();
 
   async onload(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    const storedSettings: unknown = await this.loadData();
+    const stored = asRecord(storedSettings);
+    this.settings = {
+      footprintsFolder:
+        typeof stored?.footprintsFolder === "string"
+          ? stored.footprintsFolder
+          : DEFAULT_SETTINGS.footprintsFolder,
+      attachmentsFolder:
+        typeof stored?.attachmentsFolder === "string"
+          ? stored.attachmentsFolder
+          : DEFAULT_SETTINGS.attachmentsFolder,
+      blogFolder:
+        typeof stored?.blogFolder === "string"
+          ? stored.blogFolder
+          : DEFAULT_SETTINGS.blogFolder,
+      tileUrl:
+        typeof stored?.tileUrl === "string"
+          ? stored.tileUrl
+          : DEFAULT_SETTINGS.tileUrl,
+      defaultLat:
+        typeof stored?.defaultLat === "number"
+          ? stored.defaultLat
+          : DEFAULT_SETTINGS.defaultLat,
+      defaultLng:
+        typeof stored?.defaultLng === "number"
+          ? stored.defaultLng
+          : DEFAULT_SETTINGS.defaultLng,
+      defaultZoom:
+        typeof stored?.defaultZoom === "number"
+          ? stored.defaultZoom
+          : DEFAULT_SETTINGS.defaultZoom,
+      mapHeight: normalizeMapHeight(stored?.mapHeight),
+    };
     this.settings.mapHeight = normalizeMapHeight(this.settings.mapHeight);
 
     this.registerView(VIEW_TYPE, leaf => new FootprintStudioView(leaf, this));
@@ -761,12 +795,12 @@ export default class FootprintStudioPlugin extends Plugin {
     this.addSettingTab(new FootprintStudioSettingTab(this.app, this));
   }
 
-  async onunload(): Promise<void> {
-    await Promise.all(
-      [VIEW_TYPE, OVERVIEW_VIEW_TYPE].flatMap(type =>
-        this.app.workspace.getLeavesOfType(type).map(leaf => leaf.detach())
-      )
-    );
+  onunload(): void {
+    for (const type of [VIEW_TYPE, OVERVIEW_VIEW_TYPE]) {
+      for (const leaf of this.app.workspace.getLeavesOfType(type)) {
+        leaf.detach();
+      }
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -803,7 +837,7 @@ export default class FootprintStudioPlugin extends Plugin {
       if (leaf && this.nativeMarkdownLeaves.get(leaf) === file.path) return;
       const existingLeaf = this.findStudioLeaf(file);
       if (existingLeaf) {
-        this.app.workspace.revealLeaf(existingLeaf);
+        void this.app.workspace.revealLeaf(existingLeaf);
         if (leaf && leaf !== existingLeaf && this.transientLeaves.has(leaf)) {
           this.transientLeaves.delete(leaf);
           leaf.detach();
@@ -836,7 +870,7 @@ export default class FootprintStudioPlugin extends Plugin {
     this.nativeMarkdownLeaves.set(leaf, file.path);
     try {
       if (!existingLeaf) await leaf.openFile(file);
-      this.app.workspace.revealLeaf(leaf);
+      await this.app.workspace.revealLeaf(leaf);
     } catch (error) {
       this.nativeMarkdownLeaves.delete(leaf);
       console.error("Footprint Studio 原生打开失败", error);
@@ -871,7 +905,7 @@ export default class FootprintStudioPlugin extends Plugin {
     if (file) {
       const existingLeaf = this.findStudioLeaf(file);
       if (existingLeaf) {
-        this.app.workspace.revealLeaf(existingLeaf);
+        await this.app.workspace.revealLeaf(existingLeaf);
         return;
       }
     }
@@ -882,7 +916,7 @@ export default class FootprintStudioPlugin extends Plugin {
       state: { filePath: file?.path ?? null },
       active: true,
     });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
     const view = leaf.view;
     if (
       view instanceof FootprintStudioView &&
@@ -895,7 +929,7 @@ export default class FootprintStudioPlugin extends Plugin {
   async openOverview(): Promise<void> {
     const existingLeaf = this.app.workspace.getLeavesOfType(OVERVIEW_VIEW_TYPE)[0];
     if (existingLeaf) {
-      this.app.workspace.revealLeaf(existingLeaf);
+      await this.app.workspace.revealLeaf(existingLeaf);
       if (existingLeaf.view instanceof FootprintOverviewView) {
         await existingLeaf.view.refresh();
       }
@@ -907,7 +941,7 @@ export default class FootprintStudioPlugin extends Plugin {
       type: OVERVIEW_VIEW_TYPE,
       active: true,
     });
-    this.app.workspace.revealLeaf(leaf);
+    await this.app.workspace.revealLeaf(leaf);
   }
 }
 
@@ -930,14 +964,13 @@ function overviewMarkerHtml(
   hasDraft: boolean,
   clustered = false
 ): string {
-  const marker = document.createElement("div");
-  marker.className = [
-    "footprint-overview-marker",
-    hasDraft ? "is-draft" : "",
-    clustered ? "is-cluster" : "",
-  ]
-    .filter(Boolean)
-    .join(" ");
+  const marker = createDiv({
+    cls: [
+      "footprint-overview-marker",
+      hasDraft ? "is-draft" : "",
+      clustered ? "is-cluster" : "",
+    ].filter(Boolean),
+  });
   const visual = marker.createDiv({ cls: "footprint-overview-marker-visual" });
   if (cover) {
     visual.createEl("img", { attr: { src: cover, alt: "" } });
@@ -1068,7 +1101,9 @@ class FootprintOverviewView extends ItemView {
 
   async onOpen(): Promise<void> {
     this.renderView();
-    await new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
+    await new Promise<void>(resolve =>
+      window.requestAnimationFrame(() => resolve())
+    );
     this.createMap();
     await this.refresh(true);
 
@@ -1104,7 +1139,7 @@ class FootprintOverviewView extends ItemView {
     this.refreshTimer = 0;
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
-    if (this.resizeFrame) cancelAnimationFrame(this.resizeFrame);
+    if (this.resizeFrame) window.cancelAnimationFrame(this.resizeFrame);
     this.resizeFrame = 0;
     this.clusters?.clearLayers();
     this.clusters = null;
@@ -1263,8 +1298,8 @@ class FootprintOverviewView extends ItemView {
     this.map.on("click", () => this.closePanel());
 
     this.resizeObserver = new ResizeObserver(() => {
-      if (this.resizeFrame) cancelAnimationFrame(this.resizeFrame);
-      this.resizeFrame = requestAnimationFrame(() => {
+      if (this.resizeFrame) window.cancelAnimationFrame(this.resizeFrame);
+      this.resizeFrame = window.requestAnimationFrame(() => {
         this.resizeFrame = 0;
         this.map?.invalidateSize({ pan: false, debounceMoveend: true });
       });
@@ -1508,14 +1543,16 @@ class FootprintOverviewView extends ItemView {
     });
     const posts = await Promise.all(
       files.map(async file => {
-        let frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
+        let frontmatter = asRecord(
+          this.app.metadataCache.getFileCache(file)?.frontmatter as unknown
+        );
         if (!frontmatter) {
           const markdown = await this.app.vault.cachedRead(file);
           const match = markdown.match(
             /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
           );
           if (match) {
-            frontmatter = parseYaml(match[1]) as Record<string, unknown>;
+            frontmatter = asRecord(parseYaml(match[1]) as unknown);
           }
         }
         const id = String(frontmatter?.slug ?? "").trim() || file.basename;
@@ -1527,8 +1564,8 @@ class FootprintOverviewView extends ItemView {
     const index = new Map<string, FootprintOverviewPost>();
     for (const post of posts) {
       index.set(post.id, post);
-      if (!index.has(post.file!.basename)) {
-        index.set(post.file!.basename, post);
+      if (post.file && !index.has(post.file.basename)) {
+        index.set(post.file.basename, post);
       }
     }
     return index;
@@ -1544,18 +1581,17 @@ class FootprintOverviewView extends ItemView {
     const records = await Promise.all(
       files.map(async file => {
         const markdown = await this.app.vault.cachedRead(file);
-        let frontmatter =
-          this.app.metadataCache.getFileCache(file)?.frontmatter;
+        let frontmatter = asRecord(
+          this.app.metadataCache.getFileCache(file)?.frontmatter as unknown
+        );
         if (!frontmatter) {
           const match = markdown.match(/^---\r?\n([\s\S]*?)\r?\n---/);
           if (match) {
-            frontmatter = parseYaml(match[1]) as Record<string, unknown>;
+            frontmatter = asRecord(parseYaml(match[1]) as unknown);
           }
         }
         if (!frontmatter) return null;
-        const coordinates = frontmatter.coordinates as
-          | Record<string, unknown>
-          | undefined;
+        const coordinates = asRecord(frontmatter.coordinates);
         const lat = Number(coordinates?.lat);
         const lng = Number(coordinates?.lng);
         if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
@@ -1564,8 +1600,8 @@ class FootprintOverviewView extends ItemView {
           Array.isArray(frontmatter.photos) ? frontmatter.photos : []
         )
           .map((value: unknown): FootprintOverviewPhoto | null => {
-            if (!value || typeof value !== "object") return null;
-            const photo = value as Record<string, unknown>;
+            const photo = asRecord(value);
+            if (!photo) return null;
             const source = String(photo.src ?? "");
             if (!source) return null;
             const linked = this.app.metadataCache.getFirstLinkpathDest(
@@ -1722,7 +1758,7 @@ class FootprintStudioView extends ItemView {
     this.disposePhotos();
     this.mapResizeObserver?.disconnect();
     this.mapResizeObserver = null;
-    if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+    if (this.mapResizeFrame) window.cancelAnimationFrame(this.mapResizeFrame);
     this.mapResizeFrame = 0;
     this.map?.remove();
     this.map = null;
@@ -1735,7 +1771,7 @@ class FootprintStudioView extends ItemView {
     if (!file) return;
 
     const cache = this.app.metadataCache.getFileCache(file);
-    const frontmatter = cache?.frontmatter;
+    const frontmatter = asRecord(cache?.frontmatter as unknown);
     if (!frontmatter) {
       new Notice("没有读取到这篇足迹的 frontmatter");
       return;
@@ -1755,10 +1791,11 @@ class FootprintStudioView extends ItemView {
     this.fields.town.value = String(frontmatter.town ?? "");
     this.fields.street.value = String(frontmatter.street ?? "");
     this.fields.place.value = String(frontmatter.place ?? "");
-    this.fields.lat.value = String(frontmatter.coordinates?.lat ?? "");
-    this.fields.lng.value = String(frontmatter.coordinates?.lng ?? "");
-    const savedLat = Number(frontmatter.coordinates?.lat);
-    const savedLng = Number(frontmatter.coordinates?.lng);
+    const coordinates = asRecord(frontmatter.coordinates);
+    this.fields.lat.value = String(coordinates?.lat ?? "");
+    this.fields.lng.value = String(coordinates?.lng ?? "");
+    const savedLat = Number(coordinates?.lat);
+    const savedLng = Number(coordinates?.lng);
     this.savedCoordinates =
       Number.isFinite(savedLat) && Number.isFinite(savedLng)
         ? { lat: savedLat, lng: savedLng }
@@ -1775,7 +1812,8 @@ class FootprintStudioView extends ItemView {
     this.fields.description.value = stripFrontmatter(markdown);
     this.disposePhotos();
     this.photos = (Array.isArray(frontmatter.photos) ? frontmatter.photos : []).map(
-      (photo: Record<string, unknown>, index: number) => {
+      (value: unknown, index: number) => {
+        const photo = asRecord(value) ?? {};
         const source = String(photo.src ?? "");
         const linked = this.app.metadataCache.getFirstLinkpathDest(source, file.path);
         return {
@@ -1788,9 +1826,7 @@ class FootprintStudioView extends ItemView {
           position: String(photo.position ?? "center") || "center",
           hidden: Boolean(photo.hidden),
           coordinates: (() => {
-            const coordinates = photo.coordinates as
-              | Record<string, unknown>
-              | undefined;
+            const coordinates = asRecord(photo.coordinates);
             const lat = Number(coordinates?.lat);
             const lng = Number(coordinates?.lng);
             return Number.isFinite(lat) && Number.isFinite(lng)
@@ -1814,7 +1850,7 @@ class FootprintStudioView extends ItemView {
   private async renderView(): Promise<void> {
     this.mapResizeObserver?.disconnect();
     this.mapResizeObserver = null;
-    if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
+    if (this.mapResizeFrame) window.cancelAnimationFrame(this.mapResizeFrame);
     this.mapResizeFrame = 0;
     this.contentEl.empty();
     this.contentEl.addClass("footprint-studio-view");
@@ -1865,7 +1901,7 @@ class FootprintStudioView extends ItemView {
     this.blogPosts = await this.loadBlogPosts();
     this.resetForm();
 
-    requestAnimationFrame(() => {
+    window.requestAnimationFrame(() => {
       this.map?.remove();
       this.resetMapButton = null;
       this.map = L.map(mapEl, {
@@ -1921,14 +1957,14 @@ class FootprintStudioView extends ItemView {
         this.setCoordinates(event.latlng.lat, event.latlng.lng, false);
       });
       this.mapResizeObserver = new ResizeObserver(() => {
-        if (this.mapResizeFrame) cancelAnimationFrame(this.mapResizeFrame);
-        this.mapResizeFrame = requestAnimationFrame(() => {
+        if (this.mapResizeFrame) window.cancelAnimationFrame(this.mapResizeFrame);
+        this.mapResizeFrame = window.requestAnimationFrame(() => {
           this.mapResizeFrame = 0;
           this.map?.invalidateSize({ pan: false, debounceMoveend: true });
         });
       });
       this.mapResizeObserver.observe(mapHost);
-      setTimeout(() => this.map?.invalidateSize(), 0);
+      window.setTimeout(() => this.map?.invalidateSize(), 0);
     });
   }
 
@@ -1973,14 +2009,17 @@ class FootprintStudioView extends ItemView {
       ".footprint-studio-map-panel"
     );
     if (mapPanel) applyMapHeightClass(mapPanel, height);
-    requestAnimationFrame(() => this.map?.invalidateSize({ pan: false }));
+    window.requestAnimationFrame(() =>
+      this.map?.invalidateSize({ pan: false })
+    );
   }
 
   private renderBasicFields(parent: HTMLElement): void {
     const grid = parent.createDiv({ cls: "footprint-studio-field-grid" });
     this.fields.fileName = this.createInput(grid, "文件名", "fileName", "例如 2026-07-17-panmen");
-    const fileNameControl = document.createElement("div");
-    fileNameControl.className = "footprint-studio-file-name-control";
+    const fileNameControl = createDiv({
+      cls: "footprint-studio-file-name-control",
+    });
     this.fields.fileName.replaceWith(fileNameControl);
     fileNameControl.append(this.fields.fileName);
     this.fileNameButton = makeButton(
@@ -2078,16 +2117,14 @@ class FootprintStudioView extends ItemView {
       text: "选择或直接拖入照片；添加后可拖动排序。",
     });
     const picker = makeButton(intro, "选择图片", "image-plus", "mod-cta");
-    const input = document.createElement("input");
-    input.type = "file";
-    input.accept = "image/*";
-    input.multiple = true;
+    const input = section.createEl("input", {
+      attr: { type: "file", accept: "image/*", multiple: true },
+    });
     input.hidden = true;
     input.addEventListener("change", () => {
       this.addPhotoFiles(Array.from(input.files ?? []));
       input.value = "";
     });
-    section.append(input);
     picker.addEventListener("click", () => input.click());
     this.photosEl = section.createDiv({ cls: "footprint-studio-photo-grid" });
 
@@ -2214,7 +2251,7 @@ class FootprintStudioView extends ItemView {
 
   private updateMarker(moveMap: boolean): void {
     if (!this.map) {
-      setTimeout(() => this.updateMarker(moveMap), 50);
+      window.setTimeout(() => this.updateMarker(moveMap), 50);
       return;
     }
     const lat = Number(this.fields.lat.value);
@@ -2892,19 +2929,17 @@ class FootprintStudioView extends ItemView {
     });
     const posts = await Promise.all(
       files.map(async file => {
-        let frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter as
-          | Record<string, unknown>
-          | undefined;
+        let frontmatter = asRecord(
+          this.app.metadataCache.getFileCache(file)?.frontmatter as unknown
+        );
         if (!frontmatter) {
           try {
             const source = await this.app.vault.cachedRead(file);
             const match = source.match(
               /^\uFEFF?---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
             );
-            const parsed = match ? parseYaml(match[1]) : null;
-            if (parsed && typeof parsed === "object") {
-              frontmatter = parsed as Record<string, unknown>;
-            }
+            const parsed: unknown = match ? parseYaml(match[1]) : null;
+            frontmatter = asRecord(parsed);
           } catch (error) {
             console.warn(`Footprint Studio 无法解析文章 frontmatter：${file.path}`, error);
           }
@@ -3164,56 +3199,59 @@ class FootprintStudioView extends ItemView {
       return `${frontmatterBlock}\n\n${body}${body ? "\n" : ""}`;
     });
 
-    await this.app.fileManager.processFrontMatter(file, frontmatter => {
-      const setOptional = (key: string, value: string): void => {
-        if (value) frontmatter[key] = value;
-        else delete frontmatter[key];
-      };
-
-      frontmatter.visitedAt = values.visitedAt;
-      setOptional(
-        "capturedAt",
-        values.capturedTime
-          ? `${values.visitedAt}T${values.capturedTime}`
-          : ""
-      );
-      frontmatter.country = values.country;
-      frontmatter.region = values.region;
-      frontmatter.city = values.city;
-      setOptional("district", values.district);
-      setOptional("town", values.town);
-      setOptional("street", values.street);
-      frontmatter.place = values.place;
-      frontmatter.coordinates = { lat: values.lat, lng: values.lng };
-
-      if (this.draftInput.checked) frontmatter.draft = true;
-      else delete frontmatter.draft;
-
-      if (this.selectedPosts.size) {
-        frontmatter.relatedPosts = Array.from(this.selectedPosts);
-      } else {
-        delete frontmatter.relatedPosts;
-      }
-
-      frontmatter.photos = this.photos.flatMap(photo => {
-        if (!photo.source) return [];
-        const entry: Record<string, unknown> = {
-          src: photo.source,
-          alt: photo.alt.trim() || values.place,
+    await this.app.fileManager.processFrontMatter(
+      file,
+      (frontmatter: Record<string, unknown>) => {
+        const setOptional = (key: string, value: string): void => {
+          if (value) frontmatter[key] = value;
+          else delete frontmatter[key];
         };
-        if (photo.caption.trim()) entry.caption = photo.caption.trim();
-        if (photo.position.trim()) entry.position = photo.position.trim();
-        if (photo.hidden) entry.hidden = true;
-        if (photo.capturedAt) entry.capturedAt = photo.capturedAt;
-        if (photo.coordinates) {
-          entry.coordinates = {
-            lat: photo.coordinates.lat,
-            lng: photo.coordinates.lng,
-          };
+
+        frontmatter.visitedAt = values.visitedAt;
+        setOptional(
+          "capturedAt",
+          values.capturedTime
+            ? `${values.visitedAt}T${values.capturedTime}`
+            : ""
+        );
+        frontmatter.country = values.country;
+        frontmatter.region = values.region;
+        frontmatter.city = values.city;
+        setOptional("district", values.district);
+        setOptional("town", values.town);
+        setOptional("street", values.street);
+        frontmatter.place = values.place;
+        frontmatter.coordinates = { lat: values.lat, lng: values.lng };
+
+        if (this.draftInput.checked) frontmatter.draft = true;
+        else delete frontmatter.draft;
+
+        if (this.selectedPosts.size) {
+          frontmatter.relatedPosts = Array.from(this.selectedPosts);
+        } else {
+          delete frontmatter.relatedPosts;
         }
-        return [entry];
-      });
-    });
+
+        frontmatter.photos = this.photos.flatMap(photo => {
+          if (!photo.source) return [];
+          const entry: Record<string, unknown> = {
+            src: photo.source,
+            alt: photo.alt.trim() || values.place,
+          };
+          if (photo.caption.trim()) entry.caption = photo.caption.trim();
+          if (photo.position.trim()) entry.position = photo.position.trim();
+          if (photo.hidden) entry.hidden = true;
+          if (photo.capturedAt) entry.capturedAt = photo.capturedAt;
+          if (photo.coordinates) {
+            entry.coordinates = {
+              lat: photo.coordinates.lat,
+              lng: photo.coordinates.lng,
+            };
+          }
+          return [entry];
+        });
+      }
+    );
   }
 
   private refreshTitle(): void {
@@ -3385,7 +3423,6 @@ class FootprintStudioSettingTab extends PluginSettingTab {
       .addSlider(slider =>
         slider
           .setLimits(MAP_HEIGHT_MIN, MAP_HEIGHT_MAX, 20)
-          .setDynamicTooltip()
           .setValue(this.plugin.settings.mapHeight)
           .onChange(async value => {
             this.plugin.settings.mapHeight = normalizeMapHeight(value);
@@ -3400,7 +3437,6 @@ class FootprintStudioSettingTab extends PluginSettingTab {
       .addSlider(slider =>
         slider
           .setLimits(2, 16, 1)
-          .setDynamicTooltip()
           .setValue(this.plugin.settings.defaultZoom)
           .onChange(async value => {
             this.plugin.settings.defaultZoom = value;
