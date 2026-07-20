@@ -3,7 +3,8 @@
   "name": "Footprint Studio",
   "version": "0.6.0",
   "minAppVersion": "1.6.0",
-  "description": "在 Obsidian 中通过地图总览、照片和表单创建或编辑 Astro 足迹记录。",
-  "author": "Yaavi",
+  "description": "Create and edit travel footprint notes with maps, photos, and structured metadata.",
+  "author": "vsme",
+  "authorUrl": "https://github.com/vsme",
   "isDesktopOnly": false
 }

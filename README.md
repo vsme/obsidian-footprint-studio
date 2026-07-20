@@ -1,50 +1,93 @@
 # Footprint Studio
 
-在 Obsidian 内可视化创建和编辑本站的足迹 Markdown。
+Footprint Studio is an Obsidian community plugin for creating and editing travel footprint notes with an interactive map, photos, and structured frontmatter.
 
-## Demo
+![Footprint Studio demo](https://github.com/user-attachments/assets/5e18d479-8beb-4297-b91f-f25a9e1601a1)
 
-https://github.com/user-attachments/assets/5e18d479-8beb-4297-b91f-f25a9e1601a1
+## Features
 
-## 功能
+- View all footprint notes on one map, including distinct markers for drafts.
+- Create or edit a footprint through a dedicated form instead of editing frontmatter by hand.
+- Import, reorder, caption, hide, and preview multiple photos.
+- Read GPS coordinates and capture times from supported photo EXIF metadata.
+- Search for places, reverse-geocode coordinates, and store structured address fields.
+- Link footprint notes to Markdown or MDX posts in a configurable folder.
+- Keep each footprint's images together in a dedicated attachment folder.
+- Use the editor on desktop and mobile Obsidian.
 
-- 独立“足迹总览”页面会在 Obsidian 内展示足迹目录中的全部地图点，包括草稿；草稿使用橙色特殊标记。
-- 总览地图支持照片标记聚合、30 米内同地点合并、照片详情预览，并可直接编辑对应足迹或新建足迹。
-- 照片模块位于最上方，可先整理照片，再处理地图与其他信息。
-- 在 Leaflet 地图点选坐标或搜索地点；地点补全位于左上角搜索框右侧，缩放、回到当前标记和恢复已保存坐标在左下角横向排列。
-- 拍摄日期、时间、经纬度和完整地点信息位于地图右侧的独立区域；常规窗口使用地图与信息区 `2:1`，超宽窗口使用 `3:1`，窄屏才自动上下排列。
-- 地图下方使用一个连续的简洁表单承载文件名、草稿、关联文章与文字记录，不再拆分成多个标题区块。
-- 可在插件设置中将编辑地图高度调整为 `300–680px`，窄屏会自动限制在可视区域内。
-- 每次更换坐标后重新补全国家、省、市、区县、乡镇、街道和具体地点，并严格区分市与区。
-- 保存区县、乡镇街道和道路门牌字段，网站可以暂时忽略这些扩展信息。
-- 可选择或从文件管理器直接拖入多张图片，按原比例预览、点击放大、读取 EXIF GPS、拍摄日期和时间；照片文字以无底色文字显示，点击后使用横向铺满照片的无边框浮层编辑，裁剪图标会直接标出当前九宫格焦点。
-- 单张照片可通过眼睛图标设为隐藏；状态保存在 Markdown 中，网页不会展示或处理隐藏照片。
-- 选择或拖入照片后会立即读取每张照片自己的 EXIF 坐标与拍摄时间，在照片右下角显示并写入 Markdown；网站暂不读取这些扩展字段。
-- 使用“生成”按钮把文件名写成“日期-连续地点拼音”（拼音内部不含中划线），编辑已有足迹时也可以重新生成或手动改名。
-- 基础信息按文件名、拍摄日期时间与坐标、国家省市区、详细地点四行排列。
-- 从 `blog` 目录索引 `.md` 与 `.mdx`，按标题、`slug` 或 `keywords` 搜索并高亮匹配内容，保存文章 `slug`。
-- 新建时把图片写入 `attachment/footprints/<足迹文件名>`，Markdown 写入 `footprints`。
-- 在任意已有足迹 Markdown 上执行“编辑当前足迹”即可重新进入表单。
-- 在文件列表中直接点击 `footprints` 目录内的 Markdown，会自动使用 Footprint Studio 编辑模式打开。
-- 足迹文件的右键菜单可选择“使用原生 Markdown 打开”，该标签不会被自动接管。
-- 每个 Footprint Studio 页签会保存正在编辑的 Markdown 路径，Obsidian 重启后会恢复为对应足迹，而不是变成新建页。
+The plugin interface is currently available in Simplified Chinese.
 
-## 使用
+## Installation
 
-1. 在 Obsidian 的第三方插件设置中重新加载并启用 **Footprint Studio**。
-2. 点击左侧地图图标新建足迹；点击旁边的编辑图标，可把当前足迹 Markdown 打开到独立编辑标签。
-3. 点选地图、填写信息、导入图片，然后保存。
-4. 编辑已有记录也可以在文件列表中右键 Markdown，选择“使用 Footprint Studio 编辑”。
+### From Obsidian
 
-新建操作始终打开新标签；不同足迹可以同时编辑，再次点击或编辑同一个文件时会回到它已有的标签。
+Once the plugin is accepted into the community plugin directory:
 
-默认目录可在插件设置页中修改。
+1. Open **Settings → Community plugins**.
+2. Select **Browse** and search for **Footprint Studio**.
+3. Select **Install**, then **Enable**.
 
-## 开发
+### Manual installation
+
+1. Download `main.js`, `manifest.json`, and `styles.css` from the latest GitHub release.
+2. Create `<vault>/.obsidian/plugins/footprint-studio/`.
+3. Copy the three files into that folder.
+4. Reload Obsidian and enable **Footprint Studio** under **Community plugins**.
+
+## Usage
+
+1. Select the map pin in the ribbon to open the footprint overview.
+2. Create a footprint, choose a location, complete the form, and add at least one photo.
+3. Select **保存足迹** to save the note and its managed attachments.
+4. To edit an existing note, use its file-menu action **使用 Footprint Studio 编辑**.
+
+The default folders are:
+
+- Footprint notes: `footprints`
+- Managed photos: `attachment/footprints/<footprint-name>`
+- Related posts: `blog`
+
+All three paths, the map defaults, and the tile URL can be changed in the plugin settings. The command **保存当前足迹** has no default hotkey; assign one in **Settings → Hotkeys** if desired.
+
+## Data and network access
+
+Footprint Studio stores settings through Obsidian and only modifies files in the configured vault folders. Removing a managed photo from a footprint may move that photo to the system trash when the footprint is saved.
+
+The plugin makes direct network requests for its map features:
+
+- Map tiles are loaded from the configured tile server. The default is OpenStreetMap's standard tile service.
+- Place search and reverse geocoding use the public Nominatim service at `nominatim.openstreetmap.org`.
+- Search text or selected coordinates are sent to Nominatim. Map tile requests disclose the requested map area and normal connection metadata to the tile provider.
+
+No analytics or telemetry are collected by this plugin. Review the [OpenStreetMap tile usage policy](https://operations.osmfoundation.org/policies/tiles/) and [Nominatim usage policy](https://operations.osmfoundation.org/policies/nominatim/) before heavy use.
+
+## Development
+
+Requirements: Node.js 20 or newer and pnpm 10.
 
 ```bash
 pnpm install
+pnpm run dev
+```
+
+Run a production build and type check with:
+
+```bash
 pnpm run build
 ```
 
-`main.js` 已随插件生成，正常使用不需要安装开发依赖。
+The build creates `main.js` locally. Compiled files are attached to GitHub releases and are intentionally not tracked in the source repository.
+
+## Releasing
+
+1. Update `minAppVersion` in `manifest.json` if needed.
+2. Run `pnpm version patch`, `pnpm version minor`, or `pnpm version major`.
+3. Commit and push the version change.
+4. Push a tag matching the version exactly, without a `v` prefix (for example, `0.6.1`).
+5. Review and publish the draft GitHub release created by the release workflow.
+
+The release must contain `main.js`, `manifest.json`, and `styles.css`.
+
+## License
+
+[MIT](LICENSE)

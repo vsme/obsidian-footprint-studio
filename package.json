@@ -1,11 +1,26 @@
 {
   "name": "obsidian-footprint-studio",
   "version": "0.6.0",
+  "description": "Create and edit travel footprint notes with maps, photos, and structured metadata.",
   "private": true,
   "type": "module",
+  "main": "main.js",
   "scripts": {
-    "build": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --platform=browser --target=es2020 --outfile=main.js",
-    "dev": "pnpm run build -- --watch"
+    "build": "tsc --noEmit --skipLibCheck && esbuild src/main.ts --bundle --external:obsidian --format=cjs --platform=browser --target=es2020 --outfile=main.js",
+    "dev": "esbuild src/main.ts --bundle --external:obsidian --format=cjs --platform=browser --target=es2020 --outfile=main.js --watch",
+    "version": "node version-bump.mjs && git add manifest.json versions.json",
+    "check": "pnpm run build"
+  },
+  "keywords": [
+    "obsidian",
+    "obsidian-plugin",
+    "map",
+    "travel"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/vsme/obsidian-footprint-studio.git"
   },
   "dependencies": {
     "leaflet": "^1.9.4",

@@ -362,6 +362,27 @@
   overflow: hidden;
 }
 
+.footprint-studio-map-height-300 { --footprint-studio-map-height: 300px; }
+.footprint-studio-map-height-320 { --footprint-studio-map-height: 320px; }
+.footprint-studio-map-height-340 { --footprint-studio-map-height: 340px; }
+.footprint-studio-map-height-360 { --footprint-studio-map-height: 360px; }
+.footprint-studio-map-height-380 { --footprint-studio-map-height: 380px; }
+.footprint-studio-map-height-400 { --footprint-studio-map-height: 400px; }
+.footprint-studio-map-height-420 { --footprint-studio-map-height: 420px; }
+.footprint-studio-map-height-440 { --footprint-studio-map-height: 440px; }
+.footprint-studio-map-height-460 { --footprint-studio-map-height: 460px; }
+.footprint-studio-map-height-480 { --footprint-studio-map-height: 480px; }
+.footprint-studio-map-height-500 { --footprint-studio-map-height: 500px; }
+.footprint-studio-map-height-520 { --footprint-studio-map-height: 520px; }
+.footprint-studio-map-height-540 { --footprint-studio-map-height: 540px; }
+.footprint-studio-map-height-560 { --footprint-studio-map-height: 560px; }
+.footprint-studio-map-height-580 { --footprint-studio-map-height: 580px; }
+.footprint-studio-map-height-600 { --footprint-studio-map-height: 600px; }
+.footprint-studio-map-height-620 { --footprint-studio-map-height: 620px; }
+.footprint-studio-map-height-640 { --footprint-studio-map-height: 640px; }
+.footprint-studio-map-height-660 { --footprint-studio-map-height: 660px; }
+.footprint-studio-map-height-680 { --footprint-studio-map-height: 680px; }
+
 .footprint-studio-map-toolbar {
   position: absolute;
   z-index: 1050;
