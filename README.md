@@ -2,7 +2,7 @@
 
 Footprint Studio is an Obsidian community plugin for creating and editing travel footprint notes with an interactive map, photos, and structured frontmatter.
 
-![Footprint Studio demo](https://github.com/user-attachments/assets/5e18d479-8beb-4297-b91f-f25a9e1601a1)
+https://github.com/user-attachments/assets/5e18d479-8beb-4297-b91f-f25a9e1601a1
 
 ## Features
 
