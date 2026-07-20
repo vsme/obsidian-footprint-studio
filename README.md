@@ -19,6 +19,10 @@ https://github.com/user-attachments/assets/5e18d479-8beb-4297-b91f-f25a9e1601a1
 
 The plugin interface is currently available in Simplified Chinese.
 
+### Displaying footprints on a personal website
+
+Footprint Studio is primarily designed to organize footprint data in Obsidian. If you would also like to publish your footprints on a personal website, see [bgo.me/footprints](https://bgo.me/footprints) for an example. You can build a similar page by reading the footprint notes with your preferred website framework.
+
 ## Installation
 
 ### From Obsidian

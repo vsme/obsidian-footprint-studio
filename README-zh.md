@@ -19,6 +19,10 @@ https://github.com/user-attachments/assets/5e18d479-8beb-4297-b91f-f25a9e1601a1
 
 插件界面目前提供简体中文。
 
+### 在个人网站中展示
+
+Footprint Studio 主要用于在 Obsidian 中整理足迹数据。如果你还想把这些足迹展示在个人网站上，可以参考 [bgo.me/footprints](https://bgo.me/footprints) 的页面形式，根据自己的网站框架读取足迹笔记并实现相应的展示页面。
+
 ## 安装
 
 ### 从 Obsidian 安装
